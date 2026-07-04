@@ -1,0 +1,16 @@
+{
+  "name": "no-mercy-synchro-server",
+  "version": "2.0.0",
+  "private": true,
+  "description": "No Mercy Synchro - v2 online multiplayer server (serves the client too)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
