@@ -58,6 +58,10 @@ wss.on('connection', socket => {
     switch (msg.type) {
       case 'create-room': mgr.createRoom(conn, msg.name); break;
       case 'join-room':   mgr.joinRoom(conn, msg.code, msg.name); break;
+      case 'start-game':  mgr.startGame(conn); break;
+      case 'request-display-latest': mgr.requestDisplayLatest(conn); break;
+      case 'approve-display': mgr.approveDisplay(conn, msg.requestId); break;
+      case 'reject-display': mgr.rejectDisplay(conn, msg.requestId); break;
       case 'rejoin':      mgr.rejoin(conn, msg.code, msg.token); break;
       case 'play-card':    mgr.playCard(conn, msg.cardId); break;
       case 'draw-card':    mgr.drawCard(conn); break;

@@ -81,6 +81,16 @@
   .home-error{ color:#ffb454; font-weight:700; }
   .guide-toggle-link{ background:none; color:var(--pool-glow); text-decoration:underline; font-weight:700; font-size:0.95rem; }
   .code-display{ font-family:'Baloo 2',sans-serif; font-weight:800; font-size:clamp(2.6rem,12vw,4.2rem); letter-spacing:0.25em; color:var(--gold); background:rgba(255,255,255,0.06); border:2px dashed rgba(255,206,84,0.5); border-radius:18px; padding:12px 26px; }
+  .player-list{ width:100%; max-width:520px; display:flex; flex-direction:column; gap:8px; }
+  .player-chip{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 12px; border-radius:12px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.14); font-weight:800; }
+  .player-chip small{ opacity:0.78; font-weight:800; }
+  .display-requests{ width:100%; max-width:560px; display:flex; flex-direction:column; gap:8px; margin:8px auto; }
+  .display-request{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; padding:10px 12px; border-radius:12px; background:rgba(255,206,84,0.13); border:1px solid rgba(255,206,84,0.38); }
+  .display-request-actions{ display:flex; gap:8px; }
+  .display-request-actions button{ padding:7px 12px; border-radius:999px; font-weight:800; }
+  .approve-btn{ background:var(--gold); color:var(--ink); }
+  .reject-btn{ background:rgba(255,255,255,0.12); color:var(--foam); border:1px solid rgba(255,255,255,0.3); }
+  .secondary-btn{ margin-top:0; padding:12px 18px; border-radius:999px; font-weight:800; background:rgba(255,255,255,0.12); color:var(--foam); border:1px solid rgba(255,255,255,0.25); }
 
   /* ---------- CARD GUIDE ---------- */
   .guide-panel{ background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); border-radius:16px; padding:14px 16px; margin:12px 0; text-align:left; }
@@ -114,15 +124,22 @@
   .hand-row.compact .hand-header{ padding-bottom:0; }
   .hand-row.active{ background:rgba(79,216,235,0.08); box-shadow:0 0 0 2px rgba(79,216,235,0.35) inset; }
   .hand-row.away{ opacity:0.6; }
+  .hand-row.inactive{ opacity:0.42; }
   .hand-header{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:2px 8px 6px; font-family:'Baloo 2',sans-serif; }
   .player-name{ font-weight:700; font-size:1.05rem; }
   .card-count{ font-size:0.85rem; opacity:0.75; background:rgba(255,255,255,0.08); padding:2px 9px; border-radius:999px; }
   .synchro-flag{ font-size:0.82rem; color:#ffb454; font-weight:700; }
   .away-badge{ font-size:0.78rem; color:#ff9db0; font-weight:700; }
+  .host-badge{ font-size:0.76rem; color:var(--gold); font-weight:800; }
   .synchro-main-btn{ margin-left:auto; font-size:0.78rem; font-weight:800; padding:6px 14px; border-radius:999px; background:var(--gold); color:var(--ink); flex-shrink:0; }
   .synchro-main-btn:active{ transform:translateY(1px); }
 
   .hand-cards{ display:flex; flex-wrap:wrap; gap:8px; padding:4px; min-height:96px; }
+  .opponent-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin:4px 0 8px; }
+  .opponent-grid .hand-row{ margin:0; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); }
+  .display-screen{ flex:1; display:flex; flex-direction:column; gap:12px; }
+  .display-screen .game-header h1{ font-size:clamp(1.6rem,5vw,2.5rem); }
+  .display-roster{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; }
 
   .card{
     width:clamp(58px,13vw,78px); height:clamp(82px,18vw,110px); border-radius:12px;
@@ -377,11 +394,14 @@ const GUIDE = [
 /* ============ CLIENT STATE (local only) ============ */
 let ui = {
   status:'connecting',   // 'connecting' | 'online' | 'reconnecting' | 'offline'
+  mode:'player',         // 'player' | 'display'
+  displayPending:false,
   identity:null,         // { seat, code, token }
   srv:null,              // last 'state' message from the server
   name:'', joinCode:'',
   homeError:'',
   showGuide:false,
+  showLosers:false,
   kipStep:null,          // { ownCardId } while picking the second Kip card
   glow:[]                // card ids to glow briefly
 };
@@ -403,6 +423,7 @@ function connect(){
     reconnectAttempts = 0;
     ui.status = 'online';
     if(ui.identity){ send({ type:'rejoin', code:ui.identity.code, token:ui.identity.token }); }
+    else if(ui.mode === 'display' && !ui.srv){ send({ type:'request-display-latest' }); ui.displayPending = true; }
     render();
   };
   ws.onmessage = function(e){ let m; try{ m = JSON.parse(e.data); }catch(err){ return; } handle(m); };
@@ -418,12 +439,17 @@ function send(obj){ if(ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stri
 
 function handle(m){
   if(m.type === 'joined'){ ui.identity = { seat:m.seat, code:m.code, token:m.token }; saveSession(ui.identity); return; }
+  if(m.type === 'display-pending'){ ui.mode = 'display'; ui.displayPending = true; ui.srv = { role:'display-pending', code:m.code, phase:'pending' }; render(); return; }
+  if(m.type === 'display-joined'){ ui.mode = 'display'; ui.displayPending = false; clearSession(); ui.identity = null; return; }
+  if(m.type === 'display-denied'){ ui.mode = 'player'; ui.displayPending = false; ui.srv = null; ui.homeError = 'The shared display request was not approved.'; render(); return; }
   if(m.type === 'state'){ onState(m); return; }
   if(m.type === 'error'){ onError(m.error || {}); return; }
 }
 
 function onState(m){
   ui.srv = m;
+  if(m.role === 'display'){ ui.mode = 'display'; ui.displayPending = false; clearSession(); ui.identity = null; }
+  else ui.mode = 'player';
   if(m.game){
     (m.game.events || []).forEach(function(ev){ const t = eventText(ev); if(t) toast(t); });
     if(m.game.yourResult) processResult(m.game.yourResult);
@@ -433,6 +459,11 @@ function onState(m){
 
 function onError(err){
   const code = err.code;
+  if(ui.mode === 'display'){
+    ui.displayPending = false; ui.mode = 'player'; ui.srv = null;
+    ui.homeError = friendly(code);
+    render(); return;
+  }
   if(ui.identity && (code === 'no-such-room' || code === 'bad-token')){
     // Our seat could not be resumed (server restarted, or the game already ended).
     clearSession(); ui.identity = null; ui.srv = null; ui.kipStep = null;
@@ -448,6 +479,9 @@ function friendly(code){
     case 'no-such-room': return 'No room with that code.';
     case 'already-started': return 'That game has already started.';
     case 'room-full': return 'That room is full.';
+    case 'no-active-room': return 'No active room is waiting for a shared display.';
+    case 'not-host': return 'Only the room host can do that.';
+    case 'not-enough-players': return 'At least two swimmers need to join first.';
     case 'not-your-turn': return "Hold on, it's not your turn.";
     case 'must-play': return 'You have a playable card, so you cannot draw.';
     case 'illegal-play': return "That card doesn't match.";
@@ -464,13 +498,20 @@ function doKipPickIndex(i){ send({ type:'resolve-kip', ownCardId:ui.kipStep.ownC
 function doStealPickIndex(i){ send({ type:'resolve-steal', targetIndex:i }); }
 function doSynchro(){ send({ type:'synchro' }); }
 function doCreate(){ const n = valOf('nm'); ui.name = n; ui.homeError=''; send({ type:'create-room', name:n }); }
+function doStartGame(){ send({ type:'start-game' }); }
 function doJoin(){
   const n = valOf('nm'), c = valOf('cd'); ui.name = n; ui.joinCode = c; ui.homeError='';
   if(!/^\d{4}$/.test(c)){ ui.homeError = 'Enter the 4-digit room code.'; render(); return; }
   send({ type:'join-room', code:c, name:n });
 }
+function doRequestDisplay(){
+  ui.mode = 'display'; ui.displayPending = true; ui.identity = null; clearSession(); ui.homeError='';
+  send({ type:'request-display-latest' }); render();
+}
+function doApproveDisplay(id){ send({ type:'approve-display', requestId:id }); }
+function doRejectDisplay(id){ send({ type:'reject-display', requestId:id }); }
 function leaveGame(){
-  clearSession(); ui.identity = null; ui.srv = null; ui.kipStep = null; ui.homeError=''; ui.showLosers = false;
+  clearSession(); ui.mode = 'player'; ui.displayPending = false; ui.identity = null; ui.srv = null; ui.kipStep = null; ui.homeError=''; ui.showLosers = false;
   if(ws){ ws.onclose = null; try{ ws.close(); }catch(e){} }
   if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
   reconnectAttempts = 0;
@@ -501,6 +542,13 @@ function showInfo(title, body){
 function processResult(r){
   switch(r.type){
     case 'draw': if(r.drew) setGlow([r.drew.id]); break;
+    case 'reverse': toast('Ballet Leg reversed direction.'); break;
+    case 'skip': toast((r.source || 'That card') + ' skipped ' + playerName(ui.srv, r.skipped) + '.'); break;
+    case 'synchro-caught': {
+      const caught = r.caught && r.caught.length ? r.caught.map(function(c){ return c.name; }).join(', ') : 'them';
+      toast('Caught ' + caught + '!');
+      break;
+    }
     case 'oyster-self': toast('🦪 Oyster flipped on you, drew 2!'); break;
     case 'kip': toast('🔄 Kip! You gave ' + cardLabel(r.gaveAway) + ', got ' + cardLabel(r.received) + '.'); if(r.received) setGlow([r.received.id]); break;
     case 'barracuda': toast('🦈 You snatched ' + cardLabel(r.got) + '!'); if(r.got) setGlow([r.got.id]); break;
@@ -512,6 +560,7 @@ function processResult(r){
 }
 function eventText(ev){
   switch(ev.kind){
+    case 'skip': return (ev.source || 'That card') + ' skipped your turn!';
     case 'ballet': return ev.count > 1 ? ('🩰 Ballet Leg froze you ' + ev.count + ' times!') : '🩰 Ballet Leg froze you!';
     case 'draw': { const src = ev.sources.map(function(s){ return s.source; }).join(', '); return '🌊 ' + src + ' splashed you, drew ' + ev.count + '!'; }
     case 'kip': return '🔄 Kip! You gave ' + cardLabel(ev.gaveAway) + ' and got ' + cardLabel(ev.received) + '.';
@@ -539,7 +588,23 @@ function clientPlayable(g, card){
 }
 function myPlayable(g){ return g.hand.some(function(c){ return clientPlayable(g, c); }); }
 function mustDraw(g){ return g.yourTurn && !g.choice && !myPlayable(g); }
-function opponentName(s){ const p = s.players.find(function(x){ return x.seat !== s.you.seat; }); return p ? p.name : 'Your opponent'; }
+function playerBySeat(s, seat){ return s && s.players ? s.players.find(function(x){ return x.seat === seat; }) : null; }
+function playerName(s, seat){ const p = playerBySeat(s, seat); return p ? p.name : 'that swimmer'; }
+function winnerName(s, g){ return g && g.winner !== null && g.winner !== undefined ? playerName(s, g.winner) : 'Someone'; }
+function choiceTarget(g){ return g.choiceTarget || (g.opponents && g.opponents[0]) || null; }
+function statusBadges(p){
+  return (p.host ? '<span class="host-badge">host</span>' : '') +
+    (p.active === false ? '<span class="away-badge">skipped</span>' : (!p.present ? '<span class="away-badge">away...</span>' : ''));
+}
+function renderDisplayRequests(s){
+  if(!s || !s.isHost || !s.displayRequests || !s.displayRequests.length) return '';
+  return '<div class="display-requests">' + s.displayRequests.map(function(r){
+    return '<div class="display-request"><b>Shared display wants to join</b><div class="display-request-actions">' +
+      '<button class="approve-btn" onclick="doApproveDisplay(\'' + escapeAttr(r.id) + '\')">Approve</button>' +
+      '<button class="reject-btn" onclick="doRejectDisplay(\'' + escapeAttr(r.id) + '\')">No</button>' +
+      '</div></div>';
+  }).join('') + '</div>';
+}
 
 /* ============ CARD RENDERING (identical to v1.5) ============ */
 function valueTier(card){ if(card.type !== 'number') return 'action'; return card.value >= 5 ? 'mid' : 'low'; }
@@ -602,21 +667,32 @@ function renderHome(){
     '<button class="start-btn" onclick="doCreate()">Create a Room 🌊</button>' +
     '<div class="join-row"><input id="cd" placeholder="code" maxlength="4" inputmode="numeric" value="' + escapeAttr(ui.joinCode) + '">' +
     '<button class="start-btn small" onclick="doJoin()">Join</button></div>' +
+    '<button class="secondary-btn" onclick="doRequestDisplay()">Open Shared Display</button>' +
     '<button class="guide-toggle-link" onclick="toggleGuide()">' + (ui.showGuide ? 'Hide' : 'Show') + ' the card guide</button>' +
     (ui.showGuide ? renderGuidePanel() : '') + '</div>';
 }
 function renderWaiting(){
   const s = ui.srv;
+  const roster = '<div class="player-list">' + s.players.map(function(p){
+    return '<div class="player-chip"><span>' + escapeHtml(p.name) + '</span><small>' +
+      (p.host ? 'host' : 'joined') + '</small></div>';
+  }).join('') + '</div>';
+  const start = s.isHost
+    ? (s.canStart
+      ? '<button class="start-btn" onclick="doStartGame()">Start Game</button>'
+      : '<p class="tagline">Waiting for at least one more swimmer.</p>')
+    : '<p class="tagline">Waiting for the host to start.</p>';
   return '<div class="start-screen"><h1>Room Ready</h1>' +
-    '<p class="tagline">Share this code with the other swimmer:</p>' +
+    '<p class="tagline">Share this code with the swimmers joining as players:</p>' +
     '<div class="code-display">' + escapeHtml(s.code) + '</div>' +
-    '<p class="tagline">Waiting for them to dive in...</p>' +
+    roster + renderDisplayRequests(s) + start +
     '<button class="new-names-btn" onclick="leaveGame()">Cancel</button></div>';
 }
 function renderChoiceModal(g){
+  const target = choiceTarget(g);
   if(g.choice === 'theme'){
     const isTower = g.discardTop && g.discardTop.type === 'drawFour';
-    const title = isTower ? ('Tower! Pick the new theme (' + escapeHtml(g.opponents[0].name) + ' draws 4)') : 'Blossom! Pick the new theme';
+    const title = isTower ? ('Tower! Pick the new theme (' + escapeHtml(target ? target.name : 'the next swimmer') + ' draws 4)') : 'Blossom! Pick the new theme';
     return '<div class="modal-overlay top-modal"><div class="modal-box"><h2>' + title + '</h2><div class="theme-options">' +
       THEMES.map(function(t){ return '<button class="theme-choice ' + t + '" onclick="doChooseTheme(\'' + t + '\')">' + THEME_LABELS[t] + '</button>'; }).join('') +
       '</div></div></div>';
@@ -626,13 +702,13 @@ function renderChoiceModal(g){
       return '<div class="modal-overlay"><div class="modal-box"><h2>Kip! Pick one of your cards to trade away</h2><div class="modal-hand">' +
         g.hand.map(function(c){ return renderCard(c, true, 'doKipPickOwn(' + c.id + ')'); }).join('') + '</div></div></div>';
     }
-    const n = g.opponents[0].cardCount;
-    return '<div class="modal-overlay"><div class="modal-box"><h2>Now grab a card from ' + escapeHtml(g.opponents[0].name) + '</h2><p class="blind-note">No peeking, pick blind!</p><div class="modal-hand">' +
+    const n = target ? target.cardCount : 0;
+    return '<div class="modal-overlay"><div class="modal-box"><h2>Now grab a card from ' + escapeHtml(target ? target.name : 'the next swimmer') + '</h2><p class="blind-note">No peeking, pick blind!</p><div class="modal-hand">' +
       Array.from({length:n}).map(function(_, i){ return renderHiddenCard(true, 'doKipPickIndex(' + i + ')'); }).join('') + '</div></div></div>';
   }
   if(g.choice === 'steal'){
-    const n = g.opponents[0].cardCount;
-    return '<div class="modal-overlay"><div class="modal-box"><h2>Barracuda! Snatch a card from ' + escapeHtml(g.opponents[0].name) + '</h2><p class="blind-note">No peeking, pick blind!</p><div class="modal-hand">' +
+    const n = target ? target.cardCount : 0;
+    return '<div class="modal-overlay"><div class="modal-box"><h2>Barracuda! Snatch a card from ' + escapeHtml(target ? target.name : 'the next swimmer') + '</h2><p class="blind-note">No peeking, pick blind!</p><div class="modal-hand">' +
       Array.from({length:n}).map(function(_, i){ return renderHiddenCard(true, 'doStealPickIndex(' + i + ')'); }).join('') + '</div></div></div>';
   }
   return '';
@@ -667,6 +743,89 @@ function renderGame(){
     (g.mustCallSynchro ? '<span class="synchro-flag">⚠️ say Synchro!</span>' : '') +
     '</div><div class="hand-cards">' + handHtml + '</div></div>' +
     (g.choice ? renderChoiceModal(g) : '');
+}
+function renderOpponentRows(s, g){
+  if(!g.opponents || !g.opponents.length) return '';
+  return '<div class="opponent-grid">' + g.opponents.map(function(opp){
+    const p = Object.assign({}, opp, playerBySeat(s, opp.seat) || {});
+    const cls = 'hand-row compact' + (p.active === false ? ' inactive' : (!p.present ? ' away' : '')) + (g.turn === p.seat ? ' active' : '');
+    return '<div class="' + cls + '"><div class="hand-header">' +
+      '<span class="player-name">' + escapeHtml(p.name) + '</span>' +
+      '<span class="card-count">' + p.cardCount + ' card' + (p.cardCount === 1 ? '' : 's') + '</span>' +
+      statusBadges(p) + '</div></div>';
+  }).join('') + '</div>';
+}
+function renderPlayerGame(){
+  const s = ui.srv, g = s.game;
+  const yourTurn = g.yourTurn;
+  const waitingName = g.waitingOn ? g.waitingOn.name : '';
+  const banner = g.waitingOn ? (escapeHtml(waitingName) + ' is choosing...') : (yourTurn ? 'Your turn' : (escapeHtml(playerName(s, g.turn)) + "'s turn"));
+  const direction = g.direction === -1 ? 'Reverse direction' : 'Forward direction';
+  const handHtml = g.hand.map(function(c){
+    const clickable = yourTurn && !g.choice && clientPlayable(g, c);
+    const html = renderCard(c, clickable);
+    return ui.glow.indexOf(c.id) !== -1 ? ('<span class="glow-wrap">' + html + '</span>') : html;
+  }).join('');
+  return (ui.status !== 'online' ? '<div class="reconnect-banner">Connection lost. Reconnecting...</div>' : '') +
+    '<div class="game-header"><h1>No Mercy Synchro</h1><div class="header-btns">' +
+    '<button onclick="doSynchro()">Synchro</button><button onclick="toggleGuide()">Guide</button><button onclick="leaveGame()">Leave</button></div></div>' +
+    renderDisplayRequests(s) +
+    (ui.showGuide ? renderGuidePanel() : '') +
+    '<div class="turn-banner">' + banner + '</div>' +
+    '<div class="message-banner">' + direction + '</div>' +
+    renderOpponentRows(s, g) +
+    '<div class="table-zone"><div class="pile"><div class="card-back ' + (mustDraw(g) ? 'glow-draw' : '') + '" onclick="doDraw()">&#127946;</div><div class="pile-label">Draw</div></div>' +
+    '<div class="pile">' + renderCard(g.discardTop, false) + '<div class="theme-badge ' + g.theme + '">' + THEME_LABELS[g.theme] + '</div></div></div>' +
+    '<div class="message-banner">' + (mustDraw(g) ? 'No cards to play, tap the draw pile.' : '') + '</div>' +
+    '<div class="hand-row active"><div class="hand-header">' +
+    '<span class="player-name">' + escapeHtml(s.you.name) + ' (you)</span>' +
+    '<span class="card-count">' + g.hand.length + ' card' + (g.hand.length === 1 ? '' : 's') + '</span>' +
+    (g.mustCallSynchro ? '<span class="synchro-flag">say Synchro!</span>' : '') +
+    '</div><div class="hand-cards">' + handHtml + '</div></div>' +
+    (g.choice ? renderChoiceModal(g) : '');
+}
+function renderDisplayPending(){
+  const code = ui.srv && ui.srv.code ? ui.srv.code : '';
+  return '<div class="start-screen"><h1>Shared Display</h1>' +
+    (code ? '<p class="tagline">Request sent for room ' + escapeHtml(code) + '.</p>' : '<p class="tagline">Looking for the newest room...</p>') +
+    '<p class="tagline">Waiting for the host to approve this screen.</p>' +
+    '<button class="new-names-btn" onclick="leaveGame()">Cancel</button></div>';
+}
+function renderDisplayFinalHands(g){
+  if(!g || !g.finalHands) return '';
+  return '<div class="hand-cards">' + g.finalHands.map(function(h){
+    return '<div class="hand-row"><div class="hand-header">' +
+      '<span class="player-name">' + escapeHtml(h.name) + '</span>' +
+      '<span class="card-count">' + h.cards.length + ' card' + (h.cards.length === 1 ? '' : 's') + '</span>' +
+      '</div><div class="hand-cards">' + h.cards.map(function(c){ return renderCard(c, false); }).join('') + '</div></div>';
+  }).join('') + '</div>';
+}
+function renderSharedDisplay(){
+  const s = ui.srv;
+  if(!s || s.role === 'display-pending') return renderDisplayPending();
+  const g = s.game;
+  if(!g){
+    return '<div class="display-screen"><div class="game-header"><h1>No Mercy Synchro</h1><div class="header-btns"><button onclick="leaveGame()">Leave</button></div></div>' +
+      '<div class="turn-banner">Room ' + escapeHtml(s.code) + '</div>' +
+      '<div class="display-roster">' + s.players.map(function(p){
+        return '<div class="hand-row compact"><div class="hand-header"><span class="player-name">' + escapeHtml(p.name) + '</span>' + statusBadges(p) + '</div></div>';
+      }).join('') + '</div></div>';
+  }
+  const headline = s.phase === 'over'
+    ? (s.endedReason === 'opponent-left' ? 'Game ended' : (winnerName(s, g) + ' wins!'))
+    : (g.waitingOn ? (escapeHtml(g.waitingOn.name) + ' is choosing...') : (escapeHtml(playerName(s, g.turn)) + "'s turn"));
+  return '<div class="display-screen"><div class="game-header"><h1>No Mercy Synchro</h1><div class="header-btns"><button onclick="leaveGame()">Leave</button></div></div>' +
+    '<div class="turn-banner">' + headline + '</div>' +
+    '<div class="message-banner">' + (g.direction === -1 ? 'Reverse direction' : 'Forward direction') + '</div>' +
+    '<div class="table-zone"><div class="pile"><div class="card-back static">&#127946;</div><div class="pile-label">Draw</div></div>' +
+    '<div class="pile">' + renderCard(g.discardTop, false) + '<div class="theme-badge ' + g.theme + '">' + THEME_LABELS[g.theme] + '</div></div></div>' +
+    '<div class="display-roster">' + g.players.map(function(publicPlayer){
+      const p = Object.assign({}, publicPlayer, playerBySeat(s, publicPlayer.seat) || {});
+      const cls = 'hand-row compact' + (p.active === false ? ' inactive' : (!p.present ? ' away' : '')) + (g.turn === p.seat ? ' active' : '');
+      return '<div class="' + cls + '"><div class="hand-header"><span class="player-name">' + escapeHtml(p.name) + '</span>' +
+        '<span class="card-count">' + p.cardCount + ' card' + (p.cardCount === 1 ? '' : 's') + '</span>' + statusBadges(p) + '</div></div>';
+    }).join('') + '</div>' +
+    (s.phase === 'over' ? renderDisplayFinalHands(g) : '') + '</div>';
 }
 function renderLoserHands(){
   const s = ui.srv, g = s.game;
@@ -704,15 +863,38 @@ function renderGameOver(){
     (canReveal ? '<button class="new-names-btn" onclick="toggleLoserHands()">' + (ui.showLosers ? 'Hide' : 'See') + ' what ' + escapeHtml(loserLabel) + ' stuck with 👀</button>' : '') +
     '</div></div>';
 }
+function renderPlayerGameOver(){
+  const s = ui.srv, g = s.game;
+  let headline, sub;
+  if(s.endedReason === 'opponent-left'){
+    headline = 'Game ended';
+    sub = 'Too many swimmers left the pool.';
+  } else {
+    const iWon = g && g.winner === s.you.seat;
+    headline = iWon ? 'You win!' : (winnerName(s, g) + ' wins!');
+    sub = 'No mercy, no regrets.';
+  }
+  const canReveal = g && g.finalHands && g.finalHands.some(function(h){ return h.seat !== g.winner && h.cards.length; });
+  const loserCount = g && g.finalHands ? g.finalHands.filter(function(h){ return h.seat !== g.winner && h.cards.length; }).length : 0;
+  const loserLabel = loserCount > 1 ? 'everyone else' : 'the other swimmer';
+  return '<div class="gameover-screen"><div style="font-size:3rem;">&#127942;</div><h1>' + escapeHtml(headline) + '</h1>' +
+    '<p class="tagline">' + sub + '</p>' +
+    (ui.showLosers ? renderLoserHands() : '') +
+    '<div class="gameover-btns">' +
+    '<button class="play-again-btn" onclick="leaveGame()">Back to Start</button>' +
+    (canReveal ? '<button class="new-names-btn" onclick="toggleLoserHands()">' + (ui.showLosers ? 'Hide' : 'See') + ' what ' + escapeHtml(loserLabel) + ' had left</button>' : '') +
+    '</div></div>';
+}
 
 /* ============ RENDER ============ */
 function render(){
   const app = document.getElementById('app');
   const s = ui.srv;
+  if(ui.mode === 'display' || (s && (s.role === 'display' || s.role === 'display-pending'))){ app.innerHTML = renderSharedDisplay(); return; }
   if(!s){ app.innerHTML = (ui.status === 'online') ? renderHome() : renderConnecting(); return; }
   if(s.phase === 'lobby'){ app.innerHTML = renderWaiting(); return; }
-  if(s.phase === 'over'){ app.innerHTML = renderGameOver(); return; }
-  app.innerHTML = renderGame();
+  if(s.phase === 'over'){ app.innerHTML = renderPlayerGameOver(); return; }
+  app.innerHTML = renderPlayerGame();
 }
 
 /* ============ BOOT ============ */
