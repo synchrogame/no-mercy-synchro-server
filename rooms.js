@@ -99,6 +99,10 @@ class RoomManager {
     return best;
   }
 
+  _presentPlayerCount(room) {
+    return room.seats.filter(s => s.present).length;
+  }
+
   createRoom(conn, name) {
     const code = this._newCode();
     if (code === null) { conn.send(err('no-space')); return null; }
@@ -128,9 +132,9 @@ class RoomManager {
     const found = this._findSeat(conn);
     if (!found) { conn.send(err('not-in-room')); return null; }
     const { room, seat } = found;
-    if (room.phase !== 'lobby') { conn.send(err('already-started')); return null; }
+    if (room.phase !== 'lobby' && room.phase !== 'over') { conn.send(err('already-started')); return null; }
     if (seat.seat !== room.hostSeat) { conn.send(err('not-host')); return null; }
-    if (room.seats.length < room.minPlayers) { conn.send(err('not-enough-players')); return null; }
+    if (this._presentPlayerCount(room) < room.minPlayers) { conn.send(err('not-enough-players')); return null; }
     this._start(room);
     this._broadcast(room);
     return { code: room.code };
@@ -217,6 +221,9 @@ class RoomManager {
     room.displayRequests = room.displayRequests.filter(r => r.conn);
     room.seats.sort((a, b) => a.seat - b.seat);
     room.game = engine.createGame(room.seats.map(s => s.name), { rng: this._rng });
+    for (const s of room.seats) {
+      if (!s.present) engine.setSeatActive(room.game, s.seat, false);
+    }
   }
 
   /* ---------- shared display ---------- */
@@ -315,7 +322,7 @@ class RoomManager {
       minPlayers: room.minPlayers,
       hostSeat: room.hostSeat,
       isHost: forSeat.seat === room.hostSeat,
-      canStart: room.phase === 'lobby' && forSeat.seat === room.hostSeat && room.seats.length >= room.minPlayers,
+      canStart: (room.phase === 'lobby' || room.phase === 'over') && forSeat.seat === room.hostSeat && this._presentPlayerCount(room) >= room.minPlayers,
       endedReason: room.endedReason,
       you: { seat: forSeat.seat, name: forSeat.name },
       players: this._playersFor(room),
@@ -347,9 +354,11 @@ class RoomManager {
     if (room.game) engine.clearRecap(room.game, seat.seat);
   }
 
-  _sendDisplayState(room, spectator) {
+  _sendDisplayState(room, spectator, extraGame) {
     if (!spectator.conn) return;
-    spectator.conn.send(this._viewForDisplay(room));
+    const msg = this._viewForDisplay(room);
+    if (extraGame && msg.game) Object.assign(msg.game, extraGame);
+    spectator.conn.send(msg);
   }
 
   _broadcast(room) {
@@ -368,11 +377,15 @@ class RoomManager {
   // one-shot result to the actor's message only. Disconnected seats keep their
   // recap buffers for reconnect; shared displays only see public state.
   _afterAction(room, actorSeatIdx, result) {
+    const publicExtra = result && result.public ? { publicResult: result } : null;
     for (const s of room.seats) {
-      if (s.seat === actorSeatIdx && result) this._sendState(room, s, { yourResult: result });
-      else this._sendState(room, s);
+      const extra = Object.assign({},
+        publicExtra || {},
+        (s.seat === actorSeatIdx && result && !result.public) ? { yourResult: result } : {}
+      );
+      this._sendState(room, s, Object.keys(extra).length ? extra : null);
     }
-    for (const sp of room.spectators) this._sendDisplayState(room, sp);
+    for (const sp of room.spectators) this._sendDisplayState(room, sp, publicExtra);
   }
 }
 

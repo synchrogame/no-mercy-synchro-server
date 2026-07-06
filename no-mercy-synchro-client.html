@@ -382,13 +382,13 @@ const THEME_LABELS = { tiedye:'Tie-Dye', felt:'Felt & Googly', greek:'Greek Isla
 const ACTION_LABELS = { skip:'Ballet Leg', drawTwo:'Tub', drawFour:'Tower', wild:'Blossom', swap:'Kip', steal:'Barracuda', twist:'Oyster' };
 const ACTION_ICONS = { skip:'🩰', drawTwo:'🛁', drawFour:'🗼', wild:'🌸', swap:'🔄', steal:'🦈', twist:'🦪' };
 const GUIDE = [
-  {icon:'🩰', name:'Ballet Leg', desc:"Freezes the other swimmer. They lose their next turn."},
-  {icon:'🛁', name:'Tub', desc:"Splashes 2 draw cards onto the other swimmer, then they lose their turn."},
-  {icon:'🗼', name:'Tower', desc:"Splashes 4 draw cards onto the other swimmer, they lose their turn, and you pick the new theme."},
+  {icon:'🩰', name:'Ballet Leg', desc:"Reverses the swim direction. With two swimmers, it acts like a skip."},
+  {icon:'🛁', name:'Tub', desc:"Splashes 2 draw cards onto the next swimmer, then skips their turn."},
+  {icon:'🗼', name:'Tower', desc:"Splashes 4 draw cards onto the next swimmer, skips their turn, and lets you pick the new theme."},
   {icon:'🌸', name:'Blossom', desc:"Pick a brand new theme. No drawing involved."},
-  {icon:'🔄', name:'Kip', desc:"Trade one card with the other swimmer."},
-  {icon:'🦈', name:'Barracuda', desc:"Sneak a card right out of the other swimmer's hand."},
-  {icon:'🦪', name:'Oyster', desc:"Flips fate! Whoever has fewer cards has to draw 2, even if that's you."},
+  {icon:'🔄', name:'Kip', desc:"Trade one card with the next swimmer."},
+  {icon:'🦈', name:'Barracuda', desc:"Skips the next swimmer."},
+  {icon:'🦪', name:'Oyster', desc:"Splashes the swimmer or swimmers with the fewest cards. If you are tied for fewest, only the others in that tie get splashed."},
 ];
 
 /* ============ CLIENT STATE (local only) ============ */
@@ -396,6 +396,7 @@ let ui = {
   status:'connecting',   // 'connecting' | 'online' | 'reconnecting' | 'offline'
   mode:'player',         // 'player' | 'display'
   displayPending:false,
+  paused:false,
   identity:null,         // { seat, code, token }
   srv:null,              // last 'state' message from the server
   name:'', joinCode:'',
@@ -448,10 +449,12 @@ function handle(m){
 
 function onState(m){
   ui.srv = m;
+  ui.paused = false;
   if(m.role === 'display'){ ui.mode = 'display'; ui.displayPending = false; clearSession(); ui.identity = null; }
   else ui.mode = 'player';
   if(m.game){
     (m.game.events || []).forEach(function(ev){ const t = eventText(ev); if(t) toast(t); });
+    if(m.game.publicResult) processPublicResult(m.game.publicResult);
     if(m.game.yourResult) processResult(m.game.yourResult);
   }
   render();
@@ -511,12 +514,22 @@ function doRequestDisplay(){
 function doApproveDisplay(id){ send({ type:'approve-display', requestId:id }); }
 function doRejectDisplay(id){ send({ type:'reject-display', requestId:id }); }
 function leaveGame(){
-  clearSession(); ui.mode = 'player'; ui.displayPending = false; ui.identity = null; ui.srv = null; ui.kipStep = null; ui.homeError=''; ui.showLosers = false;
+  if(ui.srv && ui.srv.phase === 'playing' && ui.identity){
+    if(!confirm('Step away from this hand? You can rejoin from this device, but your seat may be skipped if you stay away too long.')) return;
+    ui.paused = true; ui.srv = null; ui.kipStep = null; ui.homeError=''; ui.showLosers = false; ui.status = 'offline';
+    if(ws){ ws.onclose = null; try{ ws.close(); }catch(e){} ws = null; }
+    if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+    reconnectAttempts = 0;
+    render();
+    return;
+  }
+  clearSession(); ui.mode = 'player'; ui.displayPending = false; ui.paused = false; ui.identity = null; ui.srv = null; ui.kipStep = null; ui.homeError=''; ui.showLosers = false;
   if(ws){ ws.onclose = null; try{ ws.close(); }catch(e){} }
   if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
   reconnectAttempts = 0;
   connect();
 }
+function rejoinPausedGame(){ ui.paused = false; connect(); }
 function toggleGuide(){ ui.showGuide = !ui.showGuide; render(); }
 
 /* ============ TOASTS / GLOW / INFO (live, non-blocking) ============ */
@@ -550,12 +563,27 @@ function processResult(r){
       break;
     }
     case 'oyster-self': toast('🦪 Oyster flipped on you, drew 2!'); break;
+    case 'oyster-hit': {
+      const hit = r.hits && r.hits.length ? r.hits.map(function(h){ return h.name; }).join(', ') : 'nobody';
+      toast('Oyster splashed ' + hit + '.');
+      break;
+    }
     case 'kip': toast('🔄 Kip! You gave ' + cardLabel(r.gaveAway) + ', got ' + cardLabel(r.received) + '.'); if(r.received) setGlow([r.received.id]); break;
     case 'barracuda': toast('🦈 You snatched ' + cardLabel(r.got) + '!'); if(r.got) setGlow([r.got.id]); break;
     case 'synchro-declared': toast('🏊 You called Synchro!'); break;
     case 'synchro-caught': toast('🎯 Caught them! They drew 2.'); break;
     case 'synchro-warned': showInfo("That's the Synchro button!", "Tap it when you're down to your last card, or to catch your opponent if they forget. Any other time it costs you a card."); break;
     case 'synchro-penalty': showInfo('Not the right moment!', 'Nobody needs Synchro right now, so that cost you a card.'); break;
+  }
+}
+function processPublicResult(r){
+  switch(r.type){
+    case 'theme-changed': {
+      const theme = THEME_LABELS[r.theme] || r.theme;
+      const source = r.source ? (' with ' + r.source) : '';
+      toast(r.byName + ' changed the theme to ' + theme + source + '.');
+      break;
+    }
   }
 }
 function eventText(ev){
@@ -650,13 +678,19 @@ function renderHiddenCard(clickable, onClick){
 function renderGuidePanel(){
   return '<div class="guide-panel"><h3>Special Cards</h3>' +
     GUIDE.map(function(g){ return '<div class="guide-item"><div class="guide-icon">' + g.icon + '</div><div class="guide-text"><b>' + g.name + '</b><span>' + g.desc + '</span></div></div>'; }).join('') +
-    '<div class="synchro-note">🏊 Down to your last card? Tap <b>Synchro</b> before the other swimmer catches you, or draw 2.</div></div>';
+    '<div class="synchro-note">🏊 Down to your last card? Tap <b>Synchro</b> before another swimmer catches you, or draw 2.</div></div>';
 }
 
 /* ============ SCREENS ============ */
 function renderConnecting(){
   const label = ui.status === 'reconnecting' ? 'Reconnecting to your game...' : 'Diving into the pool...';
   return '<div class="conn-screen"><div class="conn-dot"></div><p class="tagline">' + label + '</p></div>';
+}
+function renderPaused(){
+  return '<div class="start-screen"><h1>Seat Saved</h1>' +
+    '<p class="tagline">You stepped away from room ' + escapeHtml(ui.identity ? ui.identity.code : '') + '. Rejoin from this device before the grace timer runs out.</p>' +
+    '<button class="start-btn" onclick="rejoinPausedGame()">Rejoin Hand</button>' +
+    '<button class="new-names-btn" onclick="leaveGame()">Back to Start</button></div>';
 }
 function renderHome(){
   return '<div class="start-screen"><h1>No Mercy Synchro</h1>' +
@@ -768,7 +802,7 @@ function renderPlayerGame(){
   }).join('');
   return (ui.status !== 'online' ? '<div class="reconnect-banner">Connection lost. Reconnecting...</div>' : '') +
     '<div class="game-header"><h1>No Mercy Synchro</h1><div class="header-btns">' +
-    '<button onclick="doSynchro()">Synchro</button><button onclick="toggleGuide()">Guide</button><button onclick="leaveGame()">Leave</button></div></div>' +
+    '<button onclick="doSynchro()">Synchro</button><button onclick="toggleGuide()">Guide</button><button onclick="leaveGame()">Step Away</button></div></div>' +
     renderDisplayRequests(s) +
     (ui.showGuide ? renderGuidePanel() : '') +
     '<div class="turn-banner">' + banner + '</div>' +
@@ -879,8 +913,10 @@ function renderPlayerGameOver(){
   const loserLabel = loserCount > 1 ? 'everyone else' : 'the other swimmer';
   return '<div class="gameover-screen"><div style="font-size:3rem;">&#127942;</div><h1>' + escapeHtml(headline) + '</h1>' +
     '<p class="tagline">' + sub + '</p>' +
+    (!s.isHost ? '<p class="tagline">Waiting for the host to start a new hand.</p>' : (!s.canStart ? '<p class="tagline">Waiting for at least one more swimmer to reconnect before a new hand.</p>' : '')) +
     (ui.showLosers ? renderLoserHands() : '') +
     '<div class="gameover-btns">' +
+    (s.isHost && s.canStart ? '<button class="play-again-btn" onclick="doStartGame()">New Hand</button>' : '') +
     '<button class="play-again-btn" onclick="leaveGame()">Back to Start</button>' +
     (canReveal ? '<button class="new-names-btn" onclick="toggleLoserHands()">' + (ui.showLosers ? 'Hide' : 'See') + ' what ' + escapeHtml(loserLabel) + ' had left</button>' : '') +
     '</div></div>';
@@ -890,6 +926,7 @@ function renderPlayerGameOver(){
 function render(){
   const app = document.getElementById('app');
   const s = ui.srv;
+  if(ui.paused && ui.identity){ app.innerHTML = renderPaused(); return; }
   if(ui.mode === 'display' || (s && (s.role === 'display' || s.role === 'display-pending'))){ app.innerHTML = renderSharedDisplay(); return; }
   if(!s){ app.innerHTML = (ui.status === 'online') ? renderHome() : renderConnecting(); return; }
   if(s.phase === 'lobby'){ app.innerHTML = renderWaiting(); return; }
@@ -903,6 +940,6 @@ window.addEventListener('load', function(){
   connect();
 });
 </script>
-<footer class="credit" style="position:relative;z-index:1;">No Mercy Synchro — online, V2</footer>
+<footer class="credit" style="position:relative;z-index:1;">No Mercy Synchro - online, v3.1.0</footer>
 </body>
 </html>

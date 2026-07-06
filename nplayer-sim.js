@@ -102,6 +102,48 @@ function testSynchroCatchesMultiple() {
   assert.strictEqual(g.hands[3].length, 3, 'Second caught player draws 2');
 }
 
+function testOysterAllPlayerTieRules() {
+  const tiedWithActor = engine.createGame(['A', 'B', 'C'], { rng: engine.makeRng(5) });
+  tiedWithActor.turn = 1;
+  tiedWithActor.direction = 1;
+  tiedWithActor.theme = 'tiedye';
+  tiedWithActor.number = 5;
+  tiedWithActor.discard = [makeCard(910, 'number', 'tiedye', 5)];
+  tiedWithActor.hands[0] = Array.from({ length: 6 }, (_, i) => makeCard(100 + i, 'number', 'felt', 1));
+  tiedWithActor.hands[1] = [makeCard(200, 'twist', null)].concat(Array.from({ length: 6 }, (_, i) => makeCard(201 + i, 'number', 'greek', 1)));
+  tiedWithActor.hands[2] = Array.from({ length: 7 }, (_, i) => makeCard(300 + i, 'number', 'dream', 1));
+  const tiedRes = engine.applyPlay(tiedWithActor, 1, 200);
+  assert(tiedRes.ok, 'Oyster tie with actor should play');
+  assert.strictEqual(tiedWithActor.hands[0].length, 8, 'Other tied-low swimmer should draw 2');
+  assert.strictEqual(tiedWithActor.hands[1].length, 6, 'Actor should not draw when merely tied for low');
+  assert.strictEqual(tiedWithActor.hands[2].length, 7, 'Non-low swimmer should not draw');
+
+  const otherTie = engine.createGame(['A', 'B', 'C'], { rng: engine.makeRng(6) });
+  otherTie.turn = 0;
+  otherTie.theme = 'tiedye';
+  otherTie.number = 5;
+  otherTie.discard = [makeCard(911, 'number', 'tiedye', 5)];
+  otherTie.hands[0] = [makeCard(400, 'twist', null)].concat(Array.from({ length: 7 }, (_, i) => makeCard(401 + i, 'number', 'greek', 1)));
+  otherTie.hands[1] = Array.from({ length: 5 }, (_, i) => makeCard(500 + i, 'number', 'felt', 1));
+  otherTie.hands[2] = Array.from({ length: 5 }, (_, i) => makeCard(600 + i, 'number', 'dream', 1));
+  const otherTieRes = engine.applyPlay(otherTie, 0, 400);
+  assert(otherTieRes.ok, 'Oyster other-player tie should play');
+  assert.strictEqual(otherTie.hands[1].length, 7, 'First tied-low non-actor should draw 2');
+  assert.strictEqual(otherTie.hands[2].length, 7, 'Second tied-low non-actor should draw 2');
+
+  const actorOnlyLow = engine.createGame(['A', 'B', 'C'], { rng: engine.makeRng(7) });
+  actorOnlyLow.turn = 0;
+  actorOnlyLow.theme = 'tiedye';
+  actorOnlyLow.number = 5;
+  actorOnlyLow.discard = [makeCard(912, 'number', 'tiedye', 5)];
+  actorOnlyLow.hands[0] = [makeCard(700, 'twist', null)].concat(Array.from({ length: 3 }, (_, i) => makeCard(701 + i, 'number', 'greek', 1)));
+  actorOnlyLow.hands[1] = Array.from({ length: 6 }, (_, i) => makeCard(800 + i, 'number', 'felt', 1));
+  actorOnlyLow.hands[2] = Array.from({ length: 6 }, (_, i) => makeCard(900 + i, 'number', 'dream', 1));
+  const selfRes = engine.applyPlay(actorOnlyLow, 0, 700);
+  assert(selfRes.ok, 'Oyster actor-only low should play');
+  assert.strictEqual(actorOnlyLow.hands[0].length, 5, 'Actor should draw when uniquely lowest');
+}
+
 function setupRoom(playerCount, seed) {
   const mgr = new RoomManager({ rng: engine.makeRng(seed) });
   const conns = Array.from({ length: playerCount }, (_, i) => conn('P' + i));
@@ -127,6 +169,14 @@ function testRoomStartHostDropAndDisplay() {
   assert(display.lastState.game, 'display should receive public game once started');
   assertNoSpectatorLeak(display.lastState);
 
+  const roomForRematch = newer.mgr.rooms.get(newer.code);
+  roomForRematch.phase = 'over';
+  roomForRematch.game.gameOver = true;
+  roomForRematch.game.winner = 0;
+  newer.mgr.startGame(newer.conns[0]);
+  assert.strictEqual(roomForRematch.phase, 'playing', 'host should be able to start a new hand after game over');
+  assert.strictEqual(roomForRematch.game.gameOver, false, 'new hand should reset game-over state');
+
   const drop = setupRoom(3, 11);
   mgrStart(drop);
   const room = drop.mgr.rooms.get(drop.code);
@@ -139,6 +189,37 @@ function testRoomStartHostDropAndDisplay() {
   const replacement = conn('P1b');
   drop.mgr.rejoin(replacement, drop.code, token);
   assert.strictEqual(engine.isSeatActive(room.game, 1), true, 'rejoined seat should become active again');
+}
+
+function testThemeChangePublicResultAndTowerPrivateDraw() {
+  const setup = setupRoom(3, 12);
+  const display = conn('TV-theme');
+  setup.mgr.requestDisplayLatest(display);
+  setup.mgr.approveDisplay(setup.conns[0], setup.conns[0].lastState.displayRequests[0].id);
+  mgrStart(setup);
+  const room = setup.mgr.rooms.get(setup.code);
+  const g = room.game;
+  g.turn = 0;
+  g.direction = 1;
+  g.theme = 'tiedye';
+  g.number = 5;
+  g.discard = [makeCard(920, 'number', 'tiedye', 5)];
+  g.hands[0] = [makeCard(921, 'drawFour', 'tiedye'), makeCard(922, 'number', 'felt', 3)];
+  const played = setup.mgr.playCard(setup.conns[0], 921);
+  assert(played.ok, 'Tower should play');
+  const chosen = setup.mgr.chooseTheme(setup.conns[0], 'dream');
+  assert(chosen.ok, 'Tower theme choice should resolve');
+
+  for (const c of setup.conns) {
+    assert(c.lastState.game.publicResult, 'player should receive public theme result');
+    assert.strictEqual(c.lastState.game.publicResult.type, 'theme-changed');
+    assert.strictEqual(c.lastState.game.publicResult.theme, 'dream');
+    assert.strictEqual(c.lastState.game.publicResult.source, 'Tower');
+  }
+  assert(display.lastState.game.publicResult, 'display should receive public theme result');
+  assert.strictEqual(display.lastState.game.publicResult.type, 'theme-changed');
+  const targetEvents = setup.conns[1].lastState.game.events || [];
+  assert(targetEvents.some(e => e.kind === 'draw' && e.count === 4), 'Tower target should still receive private draw event');
 }
 
 function mgrStart(setup) {
@@ -185,7 +266,9 @@ function playRandomGame(playerCount, seed) {
 function main() {
   testReverseAndBarracuda();
   testSynchroCatchesMultiple();
+  testOysterAllPlayerTieRules();
   testRoomStartHostDropAndDisplay();
+  testThemeChangePublicResultAndTowerPrivateDraw();
   for (const players of [3, 4, 5, 6]) {
     for (let i = 0; i < 3; i++) playRandomGame(players, 1000 + players * 10 + i);
   }

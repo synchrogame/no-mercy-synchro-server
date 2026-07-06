@@ -291,17 +291,26 @@ function applyPlay(state, seat, cardId) {
       setTurn(state, nextPresentSeat(state, target));
       return { ok: true, result: { type: 'skip', source: 'Barracuda', skipped: target } };
     case 'twist': {
-      const lenSelf = state.hands[seat].length;
-      const lenTarget = state.hands[target].length;
-      const hit = (lenSelf < lenTarget) ? seat : target; // tie -> next player (Oyster default)
-      const d = drawInternal(state, hit, 2);
-      if (hit === target) {
-        queueDraw(state, target, 'Oyster', d);
-        setTurn(state, target);
-        return { ok: true };
+      let low = Infinity;
+      for (let i = 0; i < state.hands.length; i++) {
+        if (isSeatActive(state, i)) low = Math.min(low, state.hands[i].length);
+      }
+      let hits = [];
+      for (let i = 0; i < state.hands.length; i++) {
+        if (isSeatActive(state, i) && state.hands[i].length === low) hits.push(i);
+      }
+      if (hits.length > 1 && hits.indexOf(seat) !== -1) hits = hits.filter(i => i !== seat);
+
+      const hitResults = [];
+      for (const hit of hits) {
+        const d = drawInternal(state, hit, 2);
+        hitResults.push({ seat: hit, name: state.names[hit], drew: d.length });
+        if (hit !== seat) queueDraw(state, hit, 'Oyster', d);
       }
       setTurn(state, target);
-      return { ok: true, result: { type: 'oyster-self', drew: d.length } };
+      const selfHit = hitResults.find(h => h.seat === seat);
+      if (selfHit) return { ok: true, result: { type: 'oyster-self', drew: selfHit.drew } };
+      return { ok: true, result: { type: 'oyster-hit', hits: hitResults } };
     }
   }
   return reject('unknown-card');
@@ -337,7 +346,17 @@ function applyChooseTheme(state, seat, theme) {
   } else {
     setTurn(state, target);
   }
-  return { ok: true };
+  return {
+    ok: true,
+    result: {
+      type: 'theme-changed',
+      public: true,
+      bySeat: seat,
+      byName: state.names[seat],
+      theme,
+      source: p.effect === 'drawFour' ? 'Tower' : 'Blossom'
+    }
+  };
 }
 
 function applyResolveKip(state, seat, ownCardId, targetIndex) {
