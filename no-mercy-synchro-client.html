@@ -618,6 +618,12 @@ function myPlayable(g){ return g.hand.some(function(c){ return clientPlayable(g,
 function mustDraw(g){ return g.yourTurn && !g.choice && !myPlayable(g); }
 function playerBySeat(s, seat){ return s && s.players ? s.players.find(function(x){ return x.seat === seat; }) : null; }
 function playerName(s, seat){ const p = playerBySeat(s, seat); return p ? p.name : 'that swimmer'; }
+// Two-player convenience used by the parked renderGameOver: the one seat that isn't you.
+function opponentName(s){
+  if(!s || !s.players || !s.you) return 'the other swimmer';
+  const opp = s.players.find(function(p){ return p.seat !== s.you.seat; });
+  return opp ? opp.name : 'the other swimmer';
+}
 function winnerName(s, g){ return g && g.winner !== null && g.winner !== undefined ? playerName(s, g.winner) : 'Someone'; }
 function choiceTarget(g){ return g.choiceTarget || (g.opponents && g.opponents[0]) || null; }
 function statusBadges(p){
@@ -774,7 +780,6 @@ function renderGame(){
     '<div class="hand-row active"><div class="hand-header">' +
     '<span class="player-name">' + escapeHtml(s.you.name) + ' (you)</span>' +
     '<span class="card-count">' + g.hand.length + ' card' + (g.hand.length === 1 ? '' : 's') + '</span>' +
-    (g.mustCallSynchro ? '<span class="synchro-flag">⚠️ say Synchro!</span>' : '') +
     '</div><div class="hand-cards">' + handHtml + '</div></div>' +
     (g.choice ? renderChoiceModal(g) : '');
 }
@@ -814,7 +819,6 @@ function renderPlayerGame(){
     '<div class="hand-row active"><div class="hand-header">' +
     '<span class="player-name">' + escapeHtml(s.you.name) + ' (you)</span>' +
     '<span class="card-count">' + g.hand.length + ' card' + (g.hand.length === 1 ? '' : 's') + '</span>' +
-    (g.mustCallSynchro ? '<span class="synchro-flag">say Synchro!</span>' : '') +
     '</div><div class="hand-cards">' + handHtml + '</div></div>' +
     (g.choice ? renderChoiceModal(g) : '');
 }
