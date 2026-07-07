@@ -133,6 +133,10 @@
   .host-badge{ font-size:0.76rem; color:var(--gold); font-weight:800; }
   .synchro-main-btn{ margin-left:auto; font-size:0.78rem; font-weight:800; padding:6px 14px; border-radius:999px; background:var(--gold); color:var(--ink); flex-shrink:0; }
   .synchro-main-btn:active{ transform:translateY(1px); }
+  .pace-btn{ margin-left:8px; font-size:0.74rem; font-weight:800; padding:5px 12px; border-radius:999px; flex-shrink:0; }
+  .pace-btn.nudge{ background:var(--pool-glow); color:var(--ink); }
+  .pace-btn.skip{ background:#ff5e7e; color:#fff; }
+  .pace-btn:active{ transform:translateY(1px); }
 
   .hand-cards{ display:flex; flex-wrap:wrap; gap:8px; padding:4px; min-height:96px; }
   .opponent-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin:4px 0 8px; }
@@ -516,6 +520,8 @@ function doRematchWait(){ send({ type:'rematch-wait' }); }
 function doRematchPropose(){ send({ type:'rematch-propose' }); }
 function doRematchCommit(){ send({ type:'rematch-commit' }); }
 function doImBack(){ send({ type:'im-back' }); }
+function doNudge(){ send({ type:'nudge' }); }
+function doSkip(){ send({ type:'skip' }); }
 function doJoin(){
   const n = valOf('nm'), c = valOf('cd'); ui.name = n; ui.joinCode = c; ui.homeError='';
   if(!/^\d{4}$/.test(c)){ ui.homeError = 'Enter the 4-digit room code.'; render(); return; }
@@ -604,6 +610,22 @@ function processPublicResult(r){
     }
     case 'rematch-ready': {
       toast((r.byName || 'A swimmer') + ' is in!');
+      break;
+    }
+    case 'nudged': {
+      toast('\ud83d\udc46 ' + (r.byName || 'A swimmer') + ' nudged you \u2014 your move!');
+      break;
+    }
+    case 'you-nudged': {
+      toast('Nudged ' + (r.targetName || 'them') + '.');
+      break;
+    }
+    case 'skipped': {
+      toast((r.byName || 'A swimmer') + ' was skipped.');
+      break;
+    }
+    case 'skipped-you': {
+      toast('You were skipped. Tap \u201cI\u2019m back!\u201d to jump back in.');
       break;
     }
   }
@@ -807,13 +829,18 @@ function renderGame(){
 }
 function renderOpponentRows(s, g){
   if(!g.opponents || !g.opponents.length) return '';
+  const pacing = s.pacing || {};
   return '<div class="opponent-grid">' + g.opponents.map(function(opp){
     const p = Object.assign({}, opp, playerBySeat(s, opp.seat) || {});
-    const cls = 'hand-row compact' + (p.active === false ? ' inactive' : (!p.present ? ' away' : '')) + (g.turn === p.seat ? ' active' : '');
+    const isTurn = g.turn === p.seat;
+    const cls = 'hand-row compact' + (p.active === false ? ' inactive' : (!p.present ? ' away' : '')) + (isTurn ? ' active' : '');
+    var paceBtns = '';
+    if(isTurn && pacing.canNudge) paceBtns += '<button class="pace-btn nudge" onclick="doNudge()">\ud83d\udc46 Nudge</button>';
+    if(isTurn && pacing.canSkip) paceBtns += '<button class="pace-btn skip" onclick="doSkip()">Skip turn</button>';
     return '<div class="' + cls + '"><div class="hand-header">' +
       '<span class="player-name">' + escapeHtml(p.name) + '</span>' +
       '<span class="card-count">' + p.cardCount + ' card' + (p.cardCount === 1 ? '' : 's') + '</span>' +
-      statusBadges(p) + '</div></div>';
+      statusBadges(p) + paceBtns + '</div></div>';
   }).join('') + '</div>';
 }
 function renderPlayerGame(){
@@ -1025,6 +1052,6 @@ window.addEventListener('load', function(){
   connect();
 });
 </script>
-<footer class="credit" style="position:relative;z-index:1;">No Mercy Synchro - online, v3.2.0</footer>
+<footer class="credit" style="position:relative;z-index:1;">No Mercy Synchro - online, v3.3.0</footer>
 </body>
 </html>

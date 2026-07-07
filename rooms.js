@@ -27,7 +27,8 @@ const MESSAGES = {
   'not-enough-players': 'At least two swimmers need to join first.',
   'bad-display-request': 'That shared display request is no longer available.',
   'no-rematch': 'There is no rematch to answer right now.',
-  'too-early': 'Not yet - give it a moment.'
+  'too-early': 'Not yet - give it a moment.',
+  'cannot-skip': 'You can only skip when at least three swimmers are in.'
 };
 function err(code) { return { type: 'error', error: { code, message: MESSAGES[code] || code } }; }
 
@@ -53,6 +54,10 @@ class Room {
     this.rematch = null;    // { proposed, canPropose, canCommit, ready:[], waiting:[] }
     this._proposeTimer = null;
     this._decideTimer = null;
+    // Turn pacing (nudge/skip) lives here while phase === 'playing'.
+    this.turnNudge = null;  // { nudgeReady, skipReady, nudgers:[] }
+    this._nudgeTimer = null;
+    this._skipTimer = null;
   }
   isFull() { return this.seats.length >= this.capacity; }
 }
@@ -71,6 +76,10 @@ class RoomManager {
     // place; these defaults are only used when server.js doesn't pass them (e.g. tests).
     this._rematchProposeMs = opts.rematchProposeMs || 60000;
     this._rematchDecideMs = opts.rematchDecideMs || 60000;
+    // Turn pacing: how long a turn sits idle before others may nudge, and how much
+    // longer before the host may skip (so skip unlocks at nudge + skip after turn start).
+    this._nudgeDelayMs = opts.nudgeDelayMs || 60000;
+    this._skipDelayMs = opts.skipDelayMs || 60000;
   }
 
   /* ---------- lobby / room lifecycle ---------- */
@@ -220,6 +229,7 @@ class RoomManager {
     if (activeBefore <= 2) {
       room.phase = 'over';
       room.endedReason = 'opponent-left';
+      this._resetTurnPacing(room);
       this._broadcast(room);
       return;
     }
@@ -229,6 +239,7 @@ class RoomManager {
       room.phase = 'over';
       room.endedReason = 'opponent-left';
     }
+    this._resetTurnPacing(room);
     this._broadcast(room);
   }
 
@@ -254,11 +265,41 @@ class RoomManager {
       const first = engine.nextPresentSeat(room.game, room.game.turn);
       if (first !== null) room.game.turn = first;
     }
+    this._resetTurnPacing(room);
   }
 
   _clearRematchTimers(room) {
     if (room._proposeTimer) { this._clearTimeout(room._proposeTimer); room._proposeTimer = null; }
     if (room._decideTimer) { this._clearTimeout(room._decideTimer); room._decideTimer = null; }
+  }
+
+  _clearTurnPacingTimers(room) {
+    if (room._nudgeTimer) { this._clearTimeout(room._nudgeTimer); room._nudgeTimer = null; }
+    if (room._skipTimer) { this._clearTimeout(room._skipTimer); room._skipTimer = null; }
+  }
+
+  // Restart the idle clock for the current turn. Called whenever the turn (re)starts or
+  // the current player acts, so nudge/skip only fire on a genuinely idle turn. Clears
+  // pacing entirely once the hand is no longer in progress.
+  _resetTurnPacing(room) {
+    this._clearTurnPacingTimers(room);
+    if (!room.game || room.phase !== 'playing' || room.game.gameOver) { room.turnNudge = null; return; }
+    room.turnNudge = { nudgeReady: false, skipReady: false, nudgers: [] };
+    room._nudgeTimer = this._setTimeout(() => this.nudgeWindowExpired(room.code), this._nudgeDelayMs);
+    room._skipTimer = this._setTimeout(() => this.skipWindowExpired(room.code), this._nudgeDelayMs + this._skipDelayMs);
+  }
+
+  nudgeWindowExpired(code) {
+    const room = this.rooms.get(code);
+    if (!room || room.phase !== 'playing' || !room.turnNudge) return;
+    room.turnNudge.nudgeReady = true;
+    this._broadcast(room);
+  }
+  skipWindowExpired(code) {
+    const room = this.rooms.get(code);
+    if (!room || room.phase !== 'playing' || !room.turnNudge) return;
+    room.turnNudge.skipReady = true;
+    this._broadcast(room);
   }
 
   /* ---------- shared display ---------- */
@@ -320,6 +361,7 @@ class RoomManager {
     const res = apply(room.game, seat.seat);
     if (!res.ok) { conn.send({ type: 'error', error: res.error }); return null; }
     if (room.game.gameOver) { room.phase = 'over'; this._enterRematch(room); }
+    this._resetTurnPacing(room);
     this._afterAction(room, seat.seat, res.result || null);
     return res;
   }
@@ -466,6 +508,76 @@ class RoomManager {
     return { ok: true };
   }
 
+  /* ---------- turn pacing (nudge / host skip) ---------- */
+  // A present, active player pokes whoever is sitting on their turn. One poke per player
+  // per idle turn; no group consent needed. The poke is private to the target.
+  nudge(conn) {
+    const found = this._findSeat(conn);
+    if (!found) { conn.send(err('not-in-room')); return null; }
+    const { room, seat } = found;
+    if (!room.game || room.phase !== 'playing') { conn.send(err('not-in-game')); return null; }
+    const tn = room.turnNudge;
+    if (!tn || !tn.nudgeReady) { conn.send(err('too-early')); return null; }
+    const g = room.game;
+    if (g.turn === seat.seat) return null;                 // don't nudge yourself
+    if (!engine.isSeatActive(g, seat.seat)) return null;   // benched players don't nudge
+    if (tn.nudgers.includes(seat.seat)) return null;       // already nudged this turn
+    tn.nudgers.push(seat.seat);
+    this._broadcastNudge(room, g.turn, seat.seat, seat.name, this._seatName(room, g.turn));
+    return { ok: true };
+  }
+
+  // The host skips whoever is stalling, once the skip window has elapsed. Only offered
+  // when at least three players are active, so a skip never drops the table below two.
+  // The skipped player is benched (kept by token) and returns with "I'm back".
+  skip(conn) {
+    const found = this._findSeat(conn);
+    if (!found) { conn.send(err('not-in-room')); return null; }
+    const { room, seat } = found;
+    if (!room.game || room.phase !== 'playing') { conn.send(err('not-in-game')); return null; }
+    if (seat.seat !== room.hostSeat) { conn.send(err('not-host')); return null; }
+    const tn = room.turnNudge;
+    if (!tn || !tn.skipReady) { conn.send(err('too-early')); return null; }
+    const g = room.game;
+    const target = g.turn;
+    if (target === seat.seat) return null;                 // host won't skip their own turn
+    if (engine.activeSeatCount(g) < 3) { conn.send(err('cannot-skip')); return null; }
+    const targetName = this._seatName(room, target);
+    engine.setSeatActive(g, target, false);                // benches target, moves turn, abandons any pending
+    this._resetTurnPacing(room);
+    this._broadcastSkip(room, target, targetName);
+    return { ok: true, result: { type: 'skipped', target } };
+  }
+
+  _seatName(room, seatIdx) {
+    const s = room.seats.find(x => x.seat === seatIdx);
+    return s ? s.name : (room.game ? room.game.names[seatIdx] : 'that swimmer');
+  }
+
+  // Fresh state to everyone (so nudge buttons update), a "you were nudged" toast to the
+  // target, and a small "you nudged X" confirmation to the nudger.
+  _broadcastNudge(room, targetSeatIdx, nudgerSeatIdx, nudgerName, targetName) {
+    this._ensureHost(room);
+    for (const s of room.seats) {
+      let extra = null;
+      if (s.seat === targetSeatIdx) extra = { publicResult: { type: 'nudged', byName: nudgerName } };
+      else if (s.seat === nudgerSeatIdx) extra = { publicResult: { type: 'you-nudged', targetName } };
+      this._sendState(room, s, extra);
+    }
+    for (const sp of room.spectators) this._sendDisplayState(room, sp);
+  }
+
+  // Fresh state to everyone, "you were skipped" to the target, "X was skipped" to the rest
+  // and the shared display.
+  _broadcastSkip(room, targetSeatIdx, targetName) {
+    this._ensureHost(room);
+    for (const s of room.seats) {
+      const notice = (s.seat === targetSeatIdx) ? { type: 'skipped-you' } : { type: 'skipped', byName: targetName };
+      this._sendState(room, s, { publicResult: notice });
+    }
+    for (const sp of room.spectators) this._sendDisplayState(room, sp, { publicResult: { type: 'skipped', byName: targetName } });
+  }
+
   /* ---------- delivery ---------- */
   _playersFor(room) {
     return room.seats.map(s => ({
@@ -500,7 +612,19 @@ class RoomManager {
     };
     if (room.game) msg.game = filter.gameViewFor(room.game, forSeat.seat);
     if (room.rematch) msg.rematch = this._rematchViewFor(room, forSeat.seat);
+    if (room.game && room.phase === 'playing' && room.turnNudge) msg.pacing = this._pacingViewFor(room, forSeat.seat);
     return msg;
+  }
+
+  _pacingViewFor(room, seatIdx) {
+    const tn = room.turnNudge;
+    const g = room.game;
+    const isTurnHolder = g.turn === seatIdx;
+    return {
+      turnSeat: g.turn,
+      canNudge: tn.nudgeReady && engine.isSeatActive(g, seatIdx) && !isTurnHolder && !tn.nudgers.includes(seatIdx),
+      canSkip: tn.skipReady && seatIdx === room.hostSeat && !isTurnHolder && engine.activeSeatCount(g) >= 3
+    };
   }
 
   _rematchViewFor(room, seatIdx) {

@@ -447,6 +447,113 @@ function testGraceAbandonNoRematch() {
   assert.strictEqual(room.rematch, null, 'a grace-abandoned hand offers no rematch');
 }
 
+function testNudgeBasics() {
+  const setup = setupRoom(3, 301);
+  mgrStart(setup);
+  const room = setup.mgr.rooms.get(setup.code);
+  const g = room.game;
+  const turn = g.turn;
+  const other = (turn + 1) % 3;
+  const another = (turn + 2) % 3;
+
+  assert.strictEqual(setup.conns[other].lastState.pacing.canNudge, false, 'no nudge before the window');
+  assert.strictEqual(setup.mgr.nudge(setup.conns[other]), null, 'nudge rejected before the window');
+
+  setup.mgr.nudgeWindowExpired(setup.code);
+  assert.strictEqual(setup.conns[other].lastState.pacing.canNudge, true, 'others may nudge after the window');
+  assert.strictEqual(setup.conns[turn].lastState.pacing.canNudge, false, 'the turn holder cannot nudge itself');
+
+  [0, 1, 2].forEach(i => { setup.conns[i].messages = []; });
+  setup.mgr.nudge(setup.conns[other]);
+  const nudged = c => c.messages.filter(m => m.type === 'state' && m.game && m.game.publicResult && m.game.publicResult.type === 'nudged');
+  const youNudged = c => c.messages.filter(m => m.type === 'state' && m.game && m.game.publicResult && m.game.publicResult.type === 'you-nudged');
+  assert(nudged(setup.conns[turn]).length >= 1, 'the target hears the nudge');
+  assert.strictEqual(nudged(setup.conns[another]).length, 0, 'bystanders do not hear the nudge');
+  assert(youNudged(setup.conns[other]).length >= 1, 'the nudger gets a confirmation');
+
+  assert.strictEqual(setup.conns[other].lastState.pacing.canNudge, false, 'cannot nudge twice in one turn');
+  assert.strictEqual(setup.mgr.nudge(setup.conns[other]), null, 'second nudge rejected');
+}
+
+function testHostSkip() {
+  const setup = setupRoom(3, 302);
+  mgrStart(setup);
+  const room = setup.mgr.rooms.get(setup.code);
+  const g = room.game;
+  g.turn = 1; // put the turn on a non-host seat
+  setup.mgr._resetTurnPacing(room);
+  setup.mgr._broadcast(room);
+
+  setup.mgr.nudgeWindowExpired(setup.code);
+  setup.mgr.skipWindowExpired(setup.code);
+  assert.strictEqual(setup.conns[2].lastState.pacing.canSkip, false, 'non-host cannot skip');
+  assert.strictEqual(setup.conns[0].lastState.pacing.canSkip, true, 'host may skip after the window with three active');
+  assert.strictEqual(setup.mgr.skip(setup.conns[2]), null, 'non-host skip rejected');
+
+  [0, 1, 2].forEach(i => { setup.conns[i].messages = []; });
+  const res = setup.mgr.skip(setup.conns[0]);
+  assert(res && res.ok, 'host skip succeeds');
+  assert.strictEqual(engine.isSeatActive(g, 1), false, 'the skipped seat is benched');
+  assert.notStrictEqual(g.turn, 1, 'the turn moves off the skipped seat');
+  const skippedYou = setup.conns[1].messages.filter(m => m.type === 'state' && m.game && m.game.publicResult && m.game.publicResult.type === 'skipped-you');
+  const skippedOthers = setup.conns[0].messages.filter(m => m.type === 'state' && m.game && m.game.publicResult && m.game.publicResult.type === 'skipped');
+  assert(skippedYou.length >= 1, 'the skipped player is told directly');
+  assert(skippedOthers.length >= 1, 'others are told who was skipped');
+
+  setup.mgr.imBack(setup.conns[1]);
+  assert.strictEqual(engine.isSeatActive(g, 1), true, 'the skipped player returns with I\'m back');
+}
+
+function testSkipNeedsThreeActive() {
+  const setup = setupRoom(2, 303);
+  mgrStart(setup);
+  const room = setup.mgr.rooms.get(setup.code);
+  const g = room.game;
+  g.turn = 1;
+  setup.mgr._resetTurnPacing(room);
+  setup.mgr.nudgeWindowExpired(setup.code);
+  setup.mgr.skipWindowExpired(setup.code);
+  setup.mgr._broadcast(room);
+  assert.strictEqual(setup.conns[0].lastState.pacing.canSkip, false, 'no skip offered at two players');
+  assert.strictEqual(setup.mgr.skip(setup.conns[0]), null, 'skip rejected at two players');
+  assert.strictEqual(room.phase, 'playing', 'the hand keeps going');
+}
+
+function testPacingResetsOnAction() {
+  const setup = setupRoom(3, 304);
+  mgrStart(setup);
+  const room = setup.mgr.rooms.get(setup.code);
+  const g = room.game;
+  const turn = g.turn;
+  setup.mgr.nudgeWindowExpired(setup.code);
+  assert.strictEqual(setup.conns[(turn + 1) % 3].lastState.pacing.canNudge, true, 'nudge available while idle');
+  // Force the turn holder into a draw-and-pass so we have a guaranteed action.
+  g.theme = 'tiedye'; g.number = 5;
+  g.discard = [makeCard(950, 'number', 'tiedye', 5)];
+  g.hands[turn] = [makeCard(951, 'number', 'felt', 3)];
+  g.deck = [makeCard(952, 'number', 'greek', 8)];
+  g.drawnThisTurn = false;
+  setup.mgr.drawCard(setup.conns[turn]);
+  assert.strictEqual(room.turnNudge.nudgeReady, false, 'the idle clock resets after an action');
+  assert.strictEqual(setup.conns[(turn + 2) % 3].lastState.pacing.canNudge, false, 'nudge clears after the action');
+}
+
+function testPacingClearsOnGameOver() {
+  const setup = setupRoom(3, 305);
+  mgrStart(setup);
+  const room = setup.mgr.rooms.get(setup.code);
+  const g = room.game;
+  const turn = g.turn;
+  setup.mgr.nudgeWindowExpired(setup.code);
+  assert(room.turnNudge, 'pacing active mid-hand');
+  g.theme = 'tiedye'; g.number = 5;
+  g.discard = [makeCard(960, 'number', 'tiedye', 5)];
+  g.hands[turn] = [makeCard(961, 'number', 'tiedye', 4)]; // playable last card -> win
+  setup.mgr.playCard(setup.conns[turn], 961);
+  assert.strictEqual(room.phase, 'over', 'the hand ended');
+  assert.strictEqual(room.turnNudge, null, 'pacing is cleared at game over');
+}
+
 function main() {
   testReverseAndBarracuda();
   testSynchroCatchesMultiple();
@@ -462,6 +569,11 @@ function main() {
   testRematchReadyPublicNotice();
   testRematchAbsentBenched();
   testGraceAbandonNoRematch();
+  testNudgeBasics();
+  testHostSkip();
+  testSkipNeedsThreeActive();
+  testPacingResetsOnAction();
+  testPacingClearsOnGameOver();
   for (const players of [3, 4, 5, 6]) {
     for (let i = 0; i < 3; i++) playRandomGame(players, 1000 + players * 10 + i);
   }

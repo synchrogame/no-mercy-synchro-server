@@ -29,7 +29,8 @@ const PORT = process.env.PORT || 8080;
 const GRACE_MS = 45000;            // dropped in-game seat is held this long before it's given up
 const REMATCH_PROPOSE_MS = 60000;  // after a hand ends, before the host may propose a new hand
 const REMATCH_DECIDE_MS = 60000;   // decision window after the host proposes; restarts on a Wait tap
-// (nudge/skip pacing will join here in the next item.)
+const NUDGE_DELAY_MS = 60000;      // a turn sits idle this long before others may nudge
+const SKIP_DELAY_MS = 60000;       // this much longer before the host may skip (skip unlocks at NUDGE + SKIP)
 
 const CLIENT_FILE = path.join(__dirname, 'no-mercy-synchro-client.html');
 
@@ -39,7 +40,9 @@ catch (e) { console.error('WARNING: could not read client HTML at ' + CLIENT_FIL
 
 const mgr = new RoomManager({
   rematchProposeMs: REMATCH_PROPOSE_MS,
-  rematchDecideMs: REMATCH_DECIDE_MS
+  rematchDecideMs: REMATCH_DECIDE_MS,
+  nudgeDelayMs: NUDGE_DELAY_MS,
+  skipDelayMs: SKIP_DELAY_MS
 });
 
 // Any normal GET returns the client page. WebSocket upgrade requests are handled by the
@@ -83,6 +86,8 @@ wss.on('connection', socket => {
       case 'rematch-propose': mgr.rematchPropose(conn); break;
       case 'rematch-commit':  mgr.rematchCommit(conn); break;
       case 'im-back':         mgr.imBack(conn); break;
+      case 'nudge':           mgr.nudge(conn); break;
+      case 'skip':            mgr.skip(conn); break;
       default: conn.send({ type: 'error', error: { code: 'unknown-message' } });
     }
   });
