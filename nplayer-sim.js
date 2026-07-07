@@ -263,12 +263,55 @@ function playRandomGame(playerCount, seed) {
   assert.strictEqual(room.phase, 'over', `random ${playerCount}p seed ${seed} did not finish`);
 }
 
+function testDrawAndPassPublicNotice() {
+  const setup = setupRoom(3, 77);
+  const display = conn('TV-draw');
+  setup.mgr.requestDisplayLatest(display);
+  setup.mgr.approveDisplay(setup.conns[0], setup.conns[0].lastState.displayRequests[0].id);
+  mgrStart(setup);
+  const room = setup.mgr.rooms.get(setup.code);
+  const g = room.game;
+
+  // Rig seat 0 to hold one unplayable card and draw another unplayable card, forcing
+  // a draw-and-pass.
+  g.turn = 0; g.direction = 1; g.theme = 'tiedye'; g.number = 5;
+  g.discard = [makeCard(940, 'number', 'tiedye', 5)];
+  g.hands[0] = [makeCard(941, 'number', 'felt', 3)];
+  g.deck = [makeCard(942, 'number', 'greek', 8)];
+
+  [0, 1, 2].forEach(i => { setup.conns[i].messages = []; });
+  display.messages = [];
+
+  const res = setup.mgr.drawCard(setup.conns[0]);
+  assert(res && res.ok, 'draw-and-pass should succeed');
+
+  const drawNotices = c => c.messages.filter(m => m.type === 'state' && m.game && m.game.publicResult && m.game.publicResult.type === 'draw');
+  const yourDraws = c => c.messages.filter(m => m.type === 'state' && m.game && m.game.yourResult && m.game.yourResult.type === 'draw');
+
+  // Actor: private draw, no public notice.
+  assert(yourDraws(setup.conns[0]).length >= 1, 'drawer should get a private draw result');
+  assert.strictEqual(drawNotices(setup.conns[0]).length, 0, 'drawer should not get a public draw notice');
+
+  // Others and the shared display: public notice, named, no card data.
+  for (const c of [setup.conns[1], setup.conns[2], display]) {
+    const n = drawNotices(c);
+    assert(n.length >= 1, c.label + ' should hear the public draw notice');
+    const pr = n[n.length - 1].game.publicResult;
+    assert.strictEqual(pr.byName, 'P0', 'notice names the drawer');
+    assert.strictEqual('drew' in pr, false, 'draw notice must not carry the card');
+    assert.strictEqual('id' in pr, false, 'draw notice must not carry a card id');
+  }
+
+  assert.notStrictEqual(room.game.turn, 0, 'draw-and-pass should move the turn off the drawer');
+}
+
 function main() {
   testReverseAndBarracuda();
   testSynchroCatchesMultiple();
   testOysterAllPlayerTieRules();
   testRoomStartHostDropAndDisplay();
   testThemeChangePublicResultAndTowerPrivateDraw();
+  testDrawAndPassPublicNotice();
   for (const players of [3, 4, 5, 6]) {
     for (let i = 0; i < 3; i++) playRandomGame(players, 1000 + players * 10 + i);
   }

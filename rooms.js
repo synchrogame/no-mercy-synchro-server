@@ -376,16 +376,26 @@ class RoomManager {
   // After a game action: push each seat its view, attaching the actor's own
   // one-shot result to the actor's message only. Disconnected seats keep their
   // recap buffers for reconnect; shared displays only see public state.
+  //
+  // Two kinds of public feedback ride along here:
+  //   result.public        -> a public result shown to EVERYONE including the actor
+  //                           (e.g. a theme change).
+  //   result.publicNotice  -> a public toast for everyone EXCEPT the actor, plus every
+  //                           shared display (e.g. "X drew a card"). The actor is left
+  //                           out because they already get their own private feedback.
   _afterAction(room, actorSeatIdx, result) {
     const publicExtra = result && result.public ? { publicResult: result } : null;
+    const noticeExtra = result && result.publicNotice ? { publicResult: result.publicNotice } : null;
     for (const s of room.seats) {
+      const isActor = s.seat === actorSeatIdx;
       const extra = Object.assign({},
         publicExtra || {},
-        (s.seat === actorSeatIdx && result && !result.public) ? { yourResult: result } : {}
+        (!isActor && noticeExtra) ? noticeExtra : {},
+        (isActor && result && !result.public) ? { yourResult: result } : {}
       );
       this._sendState(room, s, Object.keys(extra).length ? extra : null);
     }
-    for (const sp of room.spectators) this._sendDisplayState(room, sp, publicExtra);
+    for (const sp of room.spectators) this._sendDisplayState(room, sp, publicExtra || noticeExtra);
   }
 }
 

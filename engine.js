@@ -325,7 +325,15 @@ function applyDraw(state, seat) {
   state.drawnThisTurn = true;
   const stillStuck = !hasPlayable(state, seat);
   if (stillStuck) setTurn(state, nextPresentSeat(state, seat));
-  return { ok: true, result: { type: 'draw', drew: drawn[0] || null, canPlay: !stillStuck } };
+  const result = { type: 'draw', drew: drawn[0] || null, canPlay: !stillStuck };
+  // On a draw-and-pass (nothing playable even after drawing, so the turn moves on),
+  // tell everyone else and the shared display that a draw happened - the fact only,
+  // never the card. The drawer still gets their own private new-card glow, since this
+  // same result is delivered to them as their private yourResult.
+  if (stillStuck) {
+    result.publicNotice = { type: 'draw', bySeat: seat, byName: state.names[seat] };
+  }
+  return { ok: true, result };
 }
 
 function applyChooseTheme(state, seat, theme) {

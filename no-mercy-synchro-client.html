@@ -584,6 +584,10 @@ function processPublicResult(r){
       toast(r.byName + ' changed the theme to ' + theme + source + '.');
       break;
     }
+    case 'draw': {
+      toast((r.byName || 'A swimmer') + ' drew a card.');
+      break;
+    }
   }
 }
 function eventText(ev){
@@ -944,6 +948,6 @@ window.addEventListener('load', function(){
   connect();
 });
 </script>
-<footer class="credit" style="position:relative;z-index:1;">No Mercy Synchro - online, v3.1.0</footer>
+<footer class="credit" style="position:relative;z-index:1;">No Mercy Synchro - online, v3.1.1</footer>
 </body>
 </html>
