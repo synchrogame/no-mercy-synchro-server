@@ -392,17 +392,17 @@ function testRematchCommitNeedsEnoughReady() {
 function testRematchBenchedSeatZeroOpensOnActive() {
   const setup = setupRoom(3, 205);
   mgrStart(setup);
-  const room = endGameInto(setup, 0);
-  setup.mgr.rematchExpirePropose(setup.code);
-  setup.mgr.rematchPropose(setup.conns[0]);
+  const room = endGameInto(setup, 1);
+  // The original host (seat 0) leaves during the over phase; the host role passes to a
+  // present seat, and seat 0 will start the next hand benched.
+  setup.mgr.handleDisconnect(setup.conns[0]);
+  assert.notStrictEqual(room.hostSeat, 0, 'host passes off the absent seat 0');
   setup.mgr.rematchReady(setup.conns[1]);
-  setup.mgr.rematchReady(setup.conns[2]); // host (seat 0) never readies
-  setup.mgr.rematchExpireDecide(setup.code);
-  setup.mgr.rematchCommit(setup.conns[0]);
-  assert.strictEqual(room.phase, 'playing', 'commit starts with the host benched');
-  assert.strictEqual(engine.isSeatActive(room.game, 0), false, 'unready host is benched even though present');
+  setup.mgr.rematchReady(setup.conns[2]);
+  assert.strictEqual(room.phase, 'playing', 'the present players start the hand');
+  assert.strictEqual(engine.isSeatActive(room.game, 0), false, 'absent seat 0 starts benched');
   assert(engine.isSeatActive(room.game, room.game.turn), 'opening turn lands on an active seat');
-  assert.notStrictEqual(room.game.turn, 0, 'opening turn is not the benched seat');
+  assert.notStrictEqual(room.game.turn, 0, 'opening turn is not the benched seat 0');
 }
 
 function testRematchReadyPublicNotice() {
@@ -554,6 +554,19 @@ function testPacingClearsOnGameOver() {
   assert.strictEqual(room.turnNudge, null, 'pacing is cleared at game over');
 }
 
+function testRematchHostProposeAutoReady() {
+  const setup = setupRoom(3, 209);
+  mgrStart(setup);
+  const room = endGameInto(setup, 0);
+  setup.mgr.rematchExpirePropose(setup.code);
+  setup.mgr.rematchPropose(setup.conns[0]);
+  assert(rematchView(setup.conns[0]).youReady, 'the host is counted in just by proposing');
+  setup.mgr.rematchReady(setup.conns[1]);
+  setup.mgr.rematchReady(setup.conns[2]);
+  assert.strictEqual(room.phase, 'playing', 'starts once everyone present is in');
+  assert.strictEqual(engine.isSeatActive(room.game, 0), true, 'a host who only proposed is still active');
+}
+
 function main() {
   testReverseAndBarracuda();
   testSynchroCatchesMultiple();
@@ -566,6 +579,7 @@ function main() {
   testRematchWaitCommitBenchAndReturn();
   testRematchCommitNeedsEnoughReady();
   testRematchBenchedSeatZeroOpensOnActive();
+  testRematchHostProposeAutoReady();
   testRematchReadyPublicNotice();
   testRematchAbsentBenched();
   testGraceAbandonNoRematch();

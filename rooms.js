@@ -457,9 +457,16 @@ class RoomManager {
     if (!r.canPropose || r.proposed) { conn.send(err('too-early')); return null; }
     r.proposed = true;
     r.canCommit = false;
+    // Tapping "Ready to start?" also counts the host in - a host driving the restart is
+    // plainly playing, so they never have to also tap "I'm in".
+    if (!r.ready.includes(seat.seat)) r.ready.push(seat.seat);
+    r.waiting = r.waiting.filter(x => x !== seat.seat);
     this._clearRematchTimers(room);
-    room._decideTimer = this._setTimeout(() => this.rematchExpireDecide(room.code), this._rematchDecideMs);
-    if (this._allPresentReady(room)) { this._startRematch(room); }
+    if (this._allPresentReady(room)) {
+      this._startRematch(room);
+    } else {
+      room._decideTimer = this._setTimeout(() => this.rematchExpireDecide(room.code), this._rematchDecideMs);
+    }
     this._broadcast(room);
     return { ok: true };
   }
@@ -473,6 +480,9 @@ class RoomManager {
     if (seat.seat !== room.hostSeat) { conn.send(err('not-host')); return null; }
     const r = room.rematch;
     if (!r.proposed || !r.canCommit) { conn.send(err('too-early')); return null; }
+    // The host hitting "Start now" is in, same reasoning as propose.
+    if (!r.ready.includes(seat.seat)) r.ready.push(seat.seat);
+    r.waiting = r.waiting.filter(x => x !== seat.seat);
     if (this._readyPresentCount(room) < room.minPlayers) { conn.send(err('not-enough-players')); return null; }
     this._startRematch(room);
     this._broadcast(room);
