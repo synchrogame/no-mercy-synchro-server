@@ -25,7 +25,9 @@ const MESSAGES = {
   'not-in-game': 'The game is not in progress.',
   'not-host': 'Only the room host can do that.',
   'not-enough-players': 'At least two swimmers need to join first.',
-  'bad-display-request': 'That shared display request is no longer available.'
+  'bad-display-request': 'That shared display request is no longer available.',
+  'no-rematch': 'There is no rematch to answer right now.',
+  'too-early': 'Not yet - give it a moment.'
 };
 function err(code) { return { type: 'error', error: { code, message: MESSAGES[code] || code } }; }
 
@@ -47,15 +49,28 @@ class Room {
     this.displayRequests = []; // pending shared-display approval requests
     this.endedReason = null;
     this.game = null;
+    // Rematch (post-game ready-check) lives here while phase === 'over'.
+    this.rematch = null;    // { proposed, canPropose, canCommit, ready:[], waiting:[] }
+    this._proposeTimer = null;
+    this._decideTimer = null;
   }
   isFull() { return this.seats.length >= this.capacity; }
 }
 
 class RoomManager {
   constructor(opts) {
+    opts = opts || {};
     this.rooms = new Map();
-    this._rng = (opts && opts.rng) || Math.random;
+    this._rng = opts.rng || Math.random;
     this._seq = 0;
+    // Timers are injectable so the headless harness can disable real ones and drive
+    // expiry directly (same approach the disconnect grace uses from server.js).
+    this._setTimeout = opts.setTimeout || ((fn, ms) => setTimeout(fn, ms));
+    this._clearTimeout = opts.clearTimeout || ((h) => clearTimeout(h));
+    // Rematch pacing. Values come from server.js so all tunable timers live in one
+    // place; these defaults are only used when server.js doesn't pass them (e.g. tests).
+    this._rematchProposeMs = opts.rematchProposeMs || 60000;
+    this._rematchDecideMs = opts.rematchDecideMs || 60000;
   }
 
   /* ---------- lobby / room lifecycle ---------- */
@@ -132,7 +147,9 @@ class RoomManager {
     const found = this._findSeat(conn);
     if (!found) { conn.send(err('not-in-room')); return null; }
     const { room, seat } = found;
-    if (room.phase !== 'lobby' && room.phase !== 'over') { conn.send(err('already-started')); return null; }
+    // Only the initial start from the lobby comes through here now. Restarting after a
+    // finished hand goes through the rematch ready-check (rematchReady / propose / commit).
+    if (room.phase !== 'lobby') { conn.send(err('already-started')); return null; }
     if (seat.seat !== room.hostSeat) { conn.send(err('not-host')); return null; }
     if (this._presentPlayerCount(room) < room.minPlayers) { conn.send(err('not-enough-players')); return null; }
     this._start(room);
@@ -215,15 +232,33 @@ class RoomManager {
     this._broadcast(room);
   }
 
-  _start(room) {
+  // activeSeats (optional Set of seat indices): when provided, any PRESENT seat not in
+  // the set also starts benched (inactive). Used by the rematch commit to sit out
+  // holdouts. Without it (the initial lobby start), only absent seats are benched.
+  _start(room, activeSeats) {
     room.phase = 'playing';
     room.endedReason = null;
+    room.rematch = null;
+    this._clearRematchTimers(room);
     room.displayRequests = room.displayRequests.filter(r => r.conn);
     room.seats.sort((a, b) => a.seat - b.seat);
     room.game = engine.createGame(room.seats.map(s => s.name), { rng: this._rng });
     for (const s of room.seats) {
-      if (!s.present) engine.setSeatActive(room.game, s.seat, false);
+      const benchAbsent = !s.present;
+      const benchNotReady = activeSeats ? !activeSeats.has(s.seat) : false;
+      if (benchAbsent || benchNotReady) engine.setSeatActive(room.game, s.seat, false);
     }
+    // createGame opens on seat 0; if that seat is benched, slide the opening turn to
+    // the first active seat so play doesn't stall on an empty chair.
+    if (!engine.isSeatActive(room.game, room.game.turn)) {
+      const first = engine.nextPresentSeat(room.game, room.game.turn);
+      if (first !== null) room.game.turn = first;
+    }
+  }
+
+  _clearRematchTimers(room) {
+    if (room._proposeTimer) { this._clearTimeout(room._proposeTimer); room._proposeTimer = null; }
+    if (room._decideTimer) { this._clearTimeout(room._decideTimer); room._decideTimer = null; }
   }
 
   /* ---------- shared display ---------- */
@@ -284,7 +319,7 @@ class RoomManager {
     if (!room.game || room.phase !== 'playing') { conn.send(err('not-in-game')); return null; }
     const res = apply(room.game, seat.seat);
     if (!res.ok) { conn.send({ type: 'error', error: res.error }); return null; }
-    if (room.game.gameOver) room.phase = 'over';
+    if (room.game.gameOver) { room.phase = 'over'; this._enterRematch(room); }
     this._afterAction(room, seat.seat, res.result || null);
     return res;
   }
@@ -295,6 +330,141 @@ class RoomManager {
   resolveKip(conn, ownCardId, targetIndex) { return this._gameAction(conn, (g, s) => engine.applyResolveKip(g, s, ownCardId, targetIndex)); }
   resolveSteal(conn, targetIndex) { return this._gameAction(conn, (g, s) => engine.applyResolveSteal(g, s, targetIndex)); }
   synchro(conn) { return this._gameAction(conn, (g, s) => engine.applySynchro(g, s)); }
+
+  /* ---------- rematch (post-game ready-check) ---------- */
+  // A won hand opens a ready-check. Nothing here ever auto-starts on a timer; a timer
+  // only unlocks a host option. The hand starts when everyone present is ready, or when
+  // the host commits (sitting out any holdouts). A grace-abandoned hand (endedReason set)
+  // does not offer a rematch - there aren't enough players to restart against.
+  _enterRematch(room) {
+    if (room.endedReason) return;
+    room.rematch = { proposed: false, canPropose: false, canCommit: false, ready: [], waiting: [] };
+    this._clearRematchTimers(room);
+    room._proposeTimer = this._setTimeout(() => this.rematchExpirePropose(room.code), this._rematchProposeMs);
+  }
+
+  _readyPresentCount(room) {
+    if (!room.rematch) return 0;
+    return room.seats.filter(s => s.present && room.rematch.ready.includes(s.seat)).length;
+  }
+  _allPresentReady(room) {
+    if (!room.rematch) return false;
+    const present = room.seats.filter(s => s.present);
+    if (present.length < room.minPlayers) return false;
+    return present.every(s => room.rematch.ready.includes(s.seat));
+  }
+  _startRematch(room) {
+    // Active next hand = present players who are ready. Everyone else (absent, on Wait,
+    // or untouched) sits out but keeps their seat/token and can tap "I'm back" to join.
+    const active = new Set(
+      room.rematch.ready.filter(seatIdx => {
+        const s = room.seats.find(x => x.seat === seatIdx);
+        return s && s.present;
+      })
+    );
+    this._start(room, active);
+  }
+
+  // A player commits to the next hand (the "Play Again" tap in the propose window, or
+  // the "I'm in!" tap in the decide window). Unifies both because they mean the same thing.
+  rematchReady(conn) {
+    const found = this._findSeat(conn);
+    if (!found) { conn.send(err('not-in-room')); return null; }
+    const { room, seat } = found;
+    if (room.phase !== 'over' || !room.rematch) { conn.send(err('no-rematch')); return null; }
+    const r = room.rematch;
+    if (!r.ready.includes(seat.seat)) r.ready.push(seat.seat);
+    r.waiting = r.waiting.filter(x => x !== seat.seat);
+    if (this._allPresentReady(room)) {
+      this._startRematch(room);
+      this._broadcast(room);
+      return { ok: true, started: true };
+    }
+    // Public "X's in" toast to everyone else + the shared display, plus a roster refresh.
+    this._broadcastPublicNotice(room, seat.seat, { type: 'rematch-ready', byName: seat.name });
+    return { ok: true };
+  }
+
+  // A player asks for more time (the "Hang on" tap). Only meaningful once the host has
+  // proposed. Restarts the shared decide window (latest Wait wins) and re-locks commit.
+  rematchWait(conn) {
+    const found = this._findSeat(conn);
+    if (!found) { conn.send(err('not-in-room')); return null; }
+    const { room, seat } = found;
+    if (room.phase !== 'over' || !room.rematch) { conn.send(err('no-rematch')); return null; }
+    const r = room.rematch;
+    if (!r.proposed) return null;
+    if (r.ready.includes(seat.seat)) return null;
+    if (!r.waiting.includes(seat.seat)) r.waiting.push(seat.seat);
+    r.canCommit = false;
+    this._clearRematchTimers(room);
+    room._decideTimer = this._setTimeout(() => this.rematchExpireDecide(room.code), this._rematchDecideMs);
+    this._broadcast(room);
+    return { ok: true };
+  }
+
+  // Host taps "Ready to start?" once the propose window has elapsed. Moves to the decide
+  // stage and hands every uncommitted player Ready/Wait buttons.
+  rematchPropose(conn) {
+    const found = this._findSeat(conn);
+    if (!found) { conn.send(err('not-in-room')); return null; }
+    const { room, seat } = found;
+    if (room.phase !== 'over' || !room.rematch) { conn.send(err('no-rematch')); return null; }
+    if (seat.seat !== room.hostSeat) { conn.send(err('not-host')); return null; }
+    const r = room.rematch;
+    if (!r.canPropose || r.proposed) { conn.send(err('too-early')); return null; }
+    r.proposed = true;
+    r.canCommit = false;
+    this._clearRematchTimers(room);
+    room._decideTimer = this._setTimeout(() => this.rematchExpireDecide(room.code), this._rematchDecideMs);
+    if (this._allPresentReady(room)) { this._startRematch(room); }
+    this._broadcast(room);
+    return { ok: true };
+  }
+
+  // Host taps "Start now" once the decide window has elapsed with holdouts still out.
+  rematchCommit(conn) {
+    const found = this._findSeat(conn);
+    if (!found) { conn.send(err('not-in-room')); return null; }
+    const { room, seat } = found;
+    if (room.phase !== 'over' || !room.rematch) { conn.send(err('no-rematch')); return null; }
+    if (seat.seat !== room.hostSeat) { conn.send(err('not-host')); return null; }
+    const r = room.rematch;
+    if (!r.proposed || !r.canCommit) { conn.send(err('too-early')); return null; }
+    if (this._readyPresentCount(room) < room.minPlayers) { conn.send(err('not-enough-players')); return null; }
+    this._startRematch(room);
+    this._broadcast(room);
+    return { ok: true };
+  }
+
+  rematchExpirePropose(code) {
+    const room = this.rooms.get(code);
+    if (!room || !room.rematch || room.phase !== 'over') return;
+    if (room.rematch.proposed) return;
+    room.rematch.canPropose = true;
+    this._broadcast(room);
+  }
+  rematchExpireDecide(code) {
+    const room = this.rooms.get(code);
+    if (!room || !room.rematch || room.phase !== 'over') return;
+    if (!room.rematch.proposed) return;
+    room.rematch.canCommit = true;
+    this._broadcast(room);
+  }
+
+  // A present-but-benched player taps "I'm back" to rejoin active play mid-hand. This is
+  // the same signal a skipped player uses to return, and what a rematch holdout uses once
+  // the hand has started without them.
+  imBack(conn) {
+    const found = this._findSeat(conn);
+    if (!found) { conn.send(err('not-in-room')); return null; }
+    const { room, seat } = found;
+    if (!room.game || room.phase !== 'playing') { conn.send(err('not-in-game')); return null; }
+    if (engine.isSeatActive(room.game, seat.seat)) return null;
+    engine.setSeatActive(room.game, seat.seat, true);
+    this._broadcast(room);
+    return { ok: true };
+  }
 
   /* ---------- delivery ---------- */
   _playersFor(room) {
@@ -322,14 +492,40 @@ class RoomManager {
       minPlayers: room.minPlayers,
       hostSeat: room.hostSeat,
       isHost: forSeat.seat === room.hostSeat,
-      canStart: (room.phase === 'lobby' || room.phase === 'over') && forSeat.seat === room.hostSeat && this._presentPlayerCount(room) >= room.minPlayers,
+      canStart: room.phase === 'lobby' && forSeat.seat === room.hostSeat && this._presentPlayerCount(room) >= room.minPlayers,
       endedReason: room.endedReason,
       you: { seat: forSeat.seat, name: forSeat.name },
       players: this._playersFor(room),
       displayRequests: forSeat.seat === room.hostSeat ? this._displayRequestsFor(room) : []
     };
     if (room.game) msg.game = filter.gameViewFor(room.game, forSeat.seat);
+    if (room.rematch) msg.rematch = this._rematchViewFor(room, forSeat.seat);
     return msg;
+  }
+
+  _rematchViewFor(room, seatIdx) {
+    const r = room.rematch;
+    const isHost = seatIdx === room.hostSeat;
+    const presentCount = this._presentPlayerCount(room);
+    const readyEnough = this._readyPresentCount(room) >= room.minPlayers;
+    return {
+      stage: r.proposed ? 'deciding' : 'proposing',
+      youReady: r.ready.includes(seatIdx),
+      youWaiting: r.waiting.includes(seatIdx),
+      canPropose: isHost && r.canPropose && !r.proposed && presentCount >= room.minPlayers,
+      canCommit: isHost && r.proposed && r.canCommit && readyEnough,
+      readySeats: r.ready.slice(),
+      waitingSeats: r.waiting.slice()
+    };
+  }
+
+  _rematchPublicView(room) {
+    const r = room.rematch;
+    return {
+      stage: r.proposed ? 'deciding' : 'proposing',
+      readySeats: r.ready.slice(),
+      waitingSeats: r.waiting.slice()
+    };
   }
 
   _viewForDisplay(room) {
@@ -343,7 +539,19 @@ class RoomManager {
       players: this._playersFor(room)
     };
     if (room.game) msg.game = filter.spectatorGameView(room.game);
+    if (room.rematch) msg.rematch = this._rematchPublicView(room);
     return msg;
+  }
+
+  // Broadcast state to everyone, attaching a public toast to every connection EXCEPT the
+  // actor (who prompted it), plus every shared display. Used for "X's in" style notices.
+  _broadcastPublicNotice(room, exceptSeatIdx, notice) {
+    this._ensureHost(room);
+    for (const s of room.seats) {
+      const extra = (s.seat !== exceptSeatIdx) ? { publicResult: notice } : null;
+      this._sendState(room, s, extra);
+    }
+    for (const sp of room.spectators) this._sendDisplayState(room, sp, { publicResult: notice });
   }
 
   _sendState(room, seat, extraGame) {

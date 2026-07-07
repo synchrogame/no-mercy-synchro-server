@@ -24,14 +24,23 @@ const crypto = require('crypto');
 const { RoomManager } = require('./rooms.js');
 
 const PORT = process.env.PORT || 8080;
-const GRACE_MS = 45000; // grace period before a dropped in-game seat is given up (~45s)
+
+// ---- Tunable pacing (all in milliseconds). One place to retune after real play. ----
+const GRACE_MS = 45000;            // dropped in-game seat is held this long before it's given up
+const REMATCH_PROPOSE_MS = 60000;  // after a hand ends, before the host may propose a new hand
+const REMATCH_DECIDE_MS = 60000;   // decision window after the host proposes; restarts on a Wait tap
+// (nudge/skip pacing will join here in the next item.)
+
 const CLIENT_FILE = path.join(__dirname, 'no-mercy-synchro-client.html');
 
 let CLIENT_HTML = '';
 try { CLIENT_HTML = fs.readFileSync(CLIENT_FILE); }
 catch (e) { console.error('WARNING: could not read client HTML at ' + CLIENT_FILE + ' (' + e.message + ')'); }
 
-const mgr = new RoomManager();
+const mgr = new RoomManager({
+  rematchProposeMs: REMATCH_PROPOSE_MS,
+  rematchDecideMs: REMATCH_DECIDE_MS
+});
 
 // Any normal GET returns the client page. WebSocket upgrade requests are handled by the
 // WebSocketServer attached below, not by this handler, so the two never collide.
@@ -69,6 +78,11 @@ wss.on('connection', socket => {
       case 'resolve-kip':  mgr.resolveKip(conn, msg.ownCardId, msg.targetIndex); break;
       case 'resolve-steal':mgr.resolveSteal(conn, msg.targetIndex); break;
       case 'synchro':      mgr.synchro(conn); break;
+      case 'rematch-ready':   mgr.rematchReady(conn); break;
+      case 'rematch-wait':    mgr.rematchWait(conn); break;
+      case 'rematch-propose': mgr.rematchPropose(conn); break;
+      case 'rematch-commit':  mgr.rematchCommit(conn); break;
+      case 'im-back':         mgr.imBack(conn); break;
       default: conn.send({ type: 'error', error: { code: 'unknown-message' } });
     }
   });

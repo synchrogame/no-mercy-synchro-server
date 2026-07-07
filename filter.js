@@ -101,6 +101,7 @@ function gameViewFor(state, seat) {
   const choice = choiceInfoFor(state, seat);
   const view = Object.assign(basePublicGameView(state), {
     yourTurn: state.turn === seat && !state.gameOver && !state.pending && isSeatActive(state, seat),
+    youActive: isSeatActive(state, seat),
     hand: state.hands[seat].map(publicCard),
     opponents,
     choice: choice.choice,

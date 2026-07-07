@@ -339,6 +339,15 @@
     background:#ff5e7e; color:#fff; font-weight:800; font-size:0.9rem; padding:7px 10px;
     box-shadow:0 3px 10px rgba(0,0,0,0.4);
   }
+  .bench-banner{
+    display:flex; align-items:center; justify-content:center; gap:12px; flex-wrap:wrap;
+    background:linear-gradient(90deg,var(--pool-glow),#7ee8f5); color:var(--ink);
+    font-weight:800; padding:11px 14px; border-radius:14px; margin:0 0 12px;
+  }
+  .bench-banner button{
+    padding:9px 20px; border-radius:999px; font-weight:800; font-family:'Baloo 2',sans-serif;
+    background:var(--ink); color:var(--foam); box-shadow:0 4px 0 rgba(0,0,0,0.3);
+  }
   #toasts{ position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:70;
     display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none; width:min(92vw,460px); }
   .toast{
@@ -502,6 +511,11 @@ function doStealPickIndex(i){ send({ type:'resolve-steal', targetIndex:i }); }
 function doSynchro(){ send({ type:'synchro' }); }
 function doCreate(){ const n = valOf('nm'); ui.name = n; ui.homeError=''; send({ type:'create-room', name:n }); }
 function doStartGame(){ send({ type:'start-game' }); }
+function doRematchReady(){ send({ type:'rematch-ready' }); }
+function doRematchWait(){ send({ type:'rematch-wait' }); }
+function doRematchPropose(){ send({ type:'rematch-propose' }); }
+function doRematchCommit(){ send({ type:'rematch-commit' }); }
+function doImBack(){ send({ type:'im-back' }); }
 function doJoin(){
   const n = valOf('nm'), c = valOf('cd'); ui.name = n; ui.joinCode = c; ui.homeError='';
   if(!/^\d{4}$/.test(c)){ ui.homeError = 'Enter the 4-digit room code.'; render(); return; }
@@ -586,6 +600,10 @@ function processPublicResult(r){
     }
     case 'draw': {
       toast((r.byName || 'A swimmer') + ' drew a card.');
+      break;
+    }
+    case 'rematch-ready': {
+      toast((r.byName || 'A swimmer') + ' is in!');
       break;
     }
   }
@@ -813,6 +831,7 @@ function renderPlayerGame(){
     '<div class="game-header"><h1>No Mercy Synchro</h1><div class="header-btns">' +
     '<button onclick="doSynchro()">Synchro</button><button onclick="toggleGuide()">Guide</button><button onclick="leaveGame()">Step Away</button></div></div>' +
     renderDisplayRequests(s) +
+    (g.youActive === false ? '<div class="bench-banner"><span>You\u2019re sitting out this hand.</span><button onclick="doImBack()">I\u2019m back!</button></div>' : '') +
     (ui.showGuide ? renderGuidePanel() : '') +
     '<div class="turn-banner">' + banner + '</div>' +
     '<div class="message-banner">' + direction + '</div>' +
@@ -842,6 +861,18 @@ function renderDisplayFinalHands(g){
       '</div><div class="hand-cards">' + h.cards.map(function(c){ return renderCard(c, false); }).join('') + '</div></div>';
   }).join('') + '</div>';
 }
+function renderDisplayRematch(s){
+  if(!s.rematch) return '';
+  const rm = s.rematch;
+  const label = rm.stage === 'deciding' ? 'Starting soon \u2014 who\u2019s in?' : 'Play again?';
+  return '<div class="message-banner">' + label + '</div>' +
+    '<div class="player-list">' + s.players.map(function(p){
+      var status = !p.present ? 'away'
+        : (rm.readySeats.indexOf(p.seat) !== -1 ? 'in \u2713'
+        : (rm.waitingSeats.indexOf(p.seat) !== -1 ? 'hang on' : '\u2026'));
+      return '<div class="player-chip"><span>' + escapeHtml(p.name) + (p.host ? ' \u2b50' : '') + '</span><small>' + status + '</small></div>';
+    }).join('') + '</div>';
+}
 function renderSharedDisplay(){
   const s = ui.srv;
   if(!s || s.role === 'display-pending') return renderDisplayPending();
@@ -858,6 +889,7 @@ function renderSharedDisplay(){
     : (g.waitingOn ? (escapeHtml(g.waitingOn.name) + ' is choosing...') : (escapeHtml(playerName(s, g.turn)) + "'s turn"));
   return '<div class="display-screen"><div class="game-header"><h1>No Mercy Synchro</h1><div class="header-btns"><button onclick="leaveGame()">Leave</button></div></div>' +
     '<div class="turn-banner">' + headline + '</div>' +
+    (s.phase === 'over' ? renderDisplayRematch(s) : '') +
     '<div class="message-banner">' + (g.direction === -1 ? 'Reverse direction' : 'Forward direction') + '</div>' +
     '<div class="table-zone"><div class="pile"><div class="card-back static">&#127946;</div><div class="pile-label">Draw</div></div>' +
     '<div class="pile">' + renderCard(g.discardTop, false) + '<div class="theme-badge ' + g.theme + '">' + THEME_LABELS[g.theme] + '</div></div></div>' +
@@ -905,6 +937,52 @@ function renderGameOver(){
     (canReveal ? '<button class="new-names-btn" onclick="toggleLoserHands()">' + (ui.showLosers ? 'Hide' : 'See') + ' what ' + escapeHtml(loserLabel) + ' stuck with 👀</button>' : '') +
     '</div></div>';
 }
+function rematchStatusFor(s, p){
+  const rm = s.rematch;
+  if(!p.present) return 'away';
+  if(rm.readySeats.indexOf(p.seat) !== -1) return 'in \u2713';
+  if(rm.waitingSeats.indexOf(p.seat) !== -1) return 'hang on';
+  return rm.stage === 'deciding' ? 'deciding\u2026' : '\u2026';
+}
+function renderRematchRoster(s){
+  return '<div class="player-list">' + s.players.map(function(p){
+    return '<div class="player-chip"><span>' + escapeHtml(p.name) + (p.host ? ' \u2b50' : '') + '</span><small>' +
+      rematchStatusFor(s, p) + '</small></div>';
+  }).join('') + '</div>';
+}
+function renderRematchControls(s){
+  const rm = s.rematch;
+  const btns = [], lines = [];
+  if(rm.stage === 'proposing'){
+    if(rm.youReady){
+      lines.push('You\u2019re in! Waiting on the other swimmers.');
+    } else {
+      lines.push('Want another hand? Tap Play Again.');
+      btns.push('<button class="play-again-btn" onclick="doRematchReady()">Play Again</button>');
+    }
+    if(rm.canPropose){
+      lines.push('Ready when you are \u2014 kick off the next hand for everyone who\u2019s in.');
+      btns.push('<button class="play-again-btn" onclick="doRematchPropose()">Ready to start?</button>');
+    }
+  } else {
+    if(rm.youReady){
+      lines.push('You\u2019re in! Waiting on the other swimmers.');
+    } else if(rm.youWaiting){
+      lines.push('Take your time \u2014 tap I\u2019m in when you\u2019re ready.');
+      btns.push('<button class="play-again-btn" onclick="doRematchReady()">I\u2019m in!</button>');
+    } else {
+      lines.push('The host wants to go again. In?');
+      btns.push('<button class="play-again-btn" onclick="doRematchReady()">I\u2019m in!</button>');
+      btns.push('<button class="new-names-btn" onclick="doRematchWait()">Hang on</button>');
+    }
+    if(rm.canCommit){
+      lines.push('Some swimmers are still deciding. Start now and they\u2019ll sit out until they tap back in.');
+      btns.push('<button class="play-again-btn" onclick="doRematchCommit()">Start now</button>');
+    }
+  }
+  return lines.map(function(l){ return '<p class="tagline">' + l + '</p>'; }).join('') +
+    (btns.length ? '<div class="gameover-btns">' + btns.join('') + '</div>' : '');
+}
 function renderPlayerGameOver(){
   const s = ui.srv, g = s.game;
   let headline, sub;
@@ -919,15 +997,14 @@ function renderPlayerGameOver(){
   const canReveal = g && g.finalHands && g.finalHands.some(function(h){ return h.seat !== g.winner && h.cards.length; });
   const loserCount = g && g.finalHands ? g.finalHands.filter(function(h){ return h.seat !== g.winner && h.cards.length; }).length : 0;
   const loserLabel = loserCount > 1 ? 'everyone else' : 'the other swimmer';
+  const revealBtn = canReveal ? '<button class="new-names-btn" onclick="toggleLoserHands()">' + (ui.showLosers ? 'Hide' : 'See') + ' what ' + escapeHtml(loserLabel) + ' had left</button>' : '';
+  const backBtn = '<button class="new-names-btn" onclick="leaveGame()">Back to Start</button>';
+  const body = (s.rematch ? renderRematchRoster(s) + renderRematchControls(s) : '') +
+    '<div class="gameover-btns">' + revealBtn + backBtn + '</div>';
   return '<div class="gameover-screen"><div style="font-size:3rem;">&#127942;</div><h1>' + escapeHtml(headline) + '</h1>' +
     '<p class="tagline">' + sub + '</p>' +
-    (!s.isHost ? '<p class="tagline">Waiting for the host to start a new hand.</p>' : (!s.canStart ? '<p class="tagline">Waiting for at least one more swimmer to reconnect before a new hand.</p>' : '')) +
     (ui.showLosers ? renderLoserHands() : '') +
-    '<div class="gameover-btns">' +
-    (s.isHost && s.canStart ? '<button class="play-again-btn" onclick="doStartGame()">New Hand</button>' : '') +
-    '<button class="play-again-btn" onclick="leaveGame()">Back to Start</button>' +
-    (canReveal ? '<button class="new-names-btn" onclick="toggleLoserHands()">' + (ui.showLosers ? 'Hide' : 'See') + ' what ' + escapeHtml(loserLabel) + ' had left</button>' : '') +
-    '</div></div>';
+    body + '</div>';
 }
 
 /* ============ RENDER ============ */
@@ -948,6 +1025,6 @@ window.addEventListener('load', function(){
   connect();
 });
 </script>
-<footer class="credit" style="position:relative;z-index:1;">No Mercy Synchro - online, v3.1.1</footer>
+<footer class="credit" style="position:relative;z-index:1;">No Mercy Synchro - online, v3.2.0</footer>
 </body>
 </html>

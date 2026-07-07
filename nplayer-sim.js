@@ -145,7 +145,7 @@ function testOysterAllPlayerTieRules() {
 }
 
 function setupRoom(playerCount, seed) {
-  const mgr = new RoomManager({ rng: engine.makeRng(seed) });
+  const mgr = new RoomManager({ rng: engine.makeRng(seed), setTimeout: () => null, clearTimeout: () => {} });
   const conns = Array.from({ length: playerCount }, (_, i) => conn('P' + i));
   const first = mgr.createRoom(conns[0], 'P0');
   for (let i = 1; i < playerCount; i++) mgr.joinRoom(conns[i], first.code, 'P' + i);
@@ -173,8 +173,11 @@ function testRoomStartHostDropAndDisplay() {
   roomForRematch.phase = 'over';
   roomForRematch.game.gameOver = true;
   roomForRematch.game.winner = 0;
-  newer.mgr.startGame(newer.conns[0]);
-  assert.strictEqual(roomForRematch.phase, 'playing', 'host should be able to start a new hand after game over');
+  newer.mgr._enterRematch(roomForRematch);
+  // Both present players readying up starts the next hand (unanimous, no host action).
+  newer.mgr.rematchReady(newer.conns[0]);
+  newer.mgr.rematchReady(newer.conns[1]);
+  assert.strictEqual(roomForRematch.phase, 'playing', 'unanimous ready should start a new hand after game over');
   assert.strictEqual(roomForRematch.game.gameOver, false, 'new hand should reset game-over state');
 
   const drop = setupRoom(3, 11);
@@ -261,6 +264,7 @@ function playRandomGame(playerCount, seed) {
   }
 
   assert.strictEqual(room.phase, 'over', `random ${playerCount}p seed ${seed} did not finish`);
+  assert(room.rematch, `random ${playerCount}p seed ${seed} should open a rematch on a clean finish`);
 }
 
 function testDrawAndPassPublicNotice() {
@@ -305,6 +309,144 @@ function testDrawAndPassPublicNotice() {
   assert.notStrictEqual(room.game.turn, 0, 'draw-and-pass should move the turn off the drawer');
 }
 
+function endGameInto(setup, winnerSeat) {
+  const room = setup.mgr.rooms.get(setup.code);
+  room.phase = 'over';
+  room.game.gameOver = true;
+  room.game.winner = winnerSeat === undefined ? 0 : winnerSeat;
+  setup.mgr._enterRematch(room);
+  setup.mgr._broadcast(room); // real flow broadcasts via _afterAction right after entry
+  return room;
+}
+function rematchView(c) { return c.lastState.rematch; }
+
+function testRematchUnanimousInProposeWindow() {
+  const setup = setupRoom(3, 201);
+  mgrStart(setup);
+  const room = endGameInto(setup, 0);
+  assert(room.rematch, 'rematch should open on a clean finish');
+  assert.strictEqual(rematchView(setup.conns[0]).stage, 'proposing', 'starts in the propose window');
+  setup.mgr.rematchReady(setup.conns[0]);
+  setup.mgr.rematchReady(setup.conns[1]);
+  assert.strictEqual(room.phase, 'over', 'not everyone present is ready yet');
+  setup.mgr.rematchReady(setup.conns[2]);
+  assert.strictEqual(room.phase, 'playing', 'unanimous present ready starts the hand with no host action');
+  for (let i = 0; i < 3; i++) assert.strictEqual(engine.isSeatActive(room.game, i), true, 'every ready player is active');
+  assert.strictEqual(room.rematch, null, 'rematch state cleared once the hand starts');
+}
+
+function testRematchProposeThenAllReady() {
+  const setup = setupRoom(3, 202);
+  mgrStart(setup);
+  const room = endGameInto(setup, 0);
+  setup.mgr.rematchPropose(setup.conns[0]);
+  assert.strictEqual(room.rematch.proposed, false, 'host cannot propose before the propose window elapses');
+  setup.mgr.rematchExpirePropose(setup.code);
+  assert.strictEqual(rematchView(setup.conns[0]).canPropose, true, 'host may propose after the window elapses');
+  setup.mgr.rematchPropose(setup.conns[0]);
+  assert.strictEqual(room.rematch.proposed, true, 'host proposed');
+  assert.strictEqual(rematchView(setup.conns[1]).stage, 'deciding', 'others move to the decide stage');
+  setup.mgr.rematchReady(setup.conns[0]);
+  setup.mgr.rematchReady(setup.conns[1]);
+  assert.strictEqual(room.phase, 'over', 'still one holdout');
+  setup.mgr.rematchReady(setup.conns[2]);
+  assert.strictEqual(room.phase, 'playing', 'clearing the last holdout starts the hand');
+}
+
+function testRematchWaitCommitBenchAndReturn() {
+  const setup = setupRoom(3, 203);
+  mgrStart(setup);
+  const room = endGameInto(setup, 0);
+  setup.mgr.rematchExpirePropose(setup.code);
+  setup.mgr.rematchPropose(setup.conns[0]);
+  setup.mgr.rematchReady(setup.conns[0]);
+  setup.mgr.rematchReady(setup.conns[1]);
+  setup.mgr.rematchWait(setup.conns[2]);
+  assert.strictEqual(room.rematch.canCommit, false, 'a Wait tap re-locks commit and restarts the window');
+  assert(rematchView(setup.conns[2]).youWaiting, 'P2 shows as waiting');
+  setup.mgr.rematchExpireDecide(setup.code);
+  assert.strictEqual(rematchView(setup.conns[0]).canCommit, true, 'host may commit once the window elapses with enough ready');
+  setup.mgr.rematchCommit(setup.conns[0]);
+  assert.strictEqual(room.phase, 'playing', 'commit starts the hand');
+  assert.strictEqual(engine.isSeatActive(room.game, 0), true, 'ready host is active');
+  assert.strictEqual(engine.isSeatActive(room.game, 1), true, 'ready P1 is active');
+  assert.strictEqual(engine.isSeatActive(room.game, 2), false, 'holdout P2 starts benched');
+  setup.mgr.imBack(setup.conns[2]);
+  assert.strictEqual(engine.isSeatActive(room.game, 2), true, 'I\'m back returns the holdout to active play');
+}
+
+function testRematchCommitNeedsEnoughReady() {
+  const setup = setupRoom(3, 204);
+  mgrStart(setup);
+  const room = endGameInto(setup, 0);
+  setup.mgr.rematchExpirePropose(setup.code);
+  setup.mgr.rematchPropose(setup.conns[0]);
+  setup.mgr.rematchReady(setup.conns[0]); // only the host is ready
+  setup.mgr.rematchExpireDecide(setup.code);
+  assert.strictEqual(rematchView(setup.conns[0]).canCommit, false, 'no commit with fewer than the minimum ready');
+  const res = setup.mgr.rematchCommit(setup.conns[0]);
+  assert.strictEqual(res, null, 'commit is rejected with too few ready');
+  assert.strictEqual(room.phase, 'over', 'table keeps waiting');
+}
+
+function testRematchBenchedSeatZeroOpensOnActive() {
+  const setup = setupRoom(3, 205);
+  mgrStart(setup);
+  const room = endGameInto(setup, 0);
+  setup.mgr.rematchExpirePropose(setup.code);
+  setup.mgr.rematchPropose(setup.conns[0]);
+  setup.mgr.rematchReady(setup.conns[1]);
+  setup.mgr.rematchReady(setup.conns[2]); // host (seat 0) never readies
+  setup.mgr.rematchExpireDecide(setup.code);
+  setup.mgr.rematchCommit(setup.conns[0]);
+  assert.strictEqual(room.phase, 'playing', 'commit starts with the host benched');
+  assert.strictEqual(engine.isSeatActive(room.game, 0), false, 'unready host is benched even though present');
+  assert(engine.isSeatActive(room.game, room.game.turn), 'opening turn lands on an active seat');
+  assert.notStrictEqual(room.game.turn, 0, 'opening turn is not the benched seat');
+}
+
+function testRematchReadyPublicNotice() {
+  const setup = setupRoom(3, 206);
+  const display = conn('TV-rm');
+  setup.mgr.requestDisplayLatest(display);
+  setup.mgr.approveDisplay(setup.conns[0], setup.conns[0].lastState.displayRequests[0].id);
+  mgrStart(setup);
+  const room = endGameInto(setup, 0);
+  [0, 1, 2].forEach(i => { setup.conns[i].messages = []; });
+  display.messages = [];
+  setup.mgr.rematchReady(setup.conns[1]); // P1 taps in, not unanimous
+  const notices = c => c.messages.filter(m => m.type === 'state' && m.game && m.game.publicResult && m.game.publicResult.type === 'rematch-ready');
+  assert.strictEqual(notices(setup.conns[1]).length, 0, 'the player who tapped in gets no self toast');
+  assert(notices(setup.conns[0]).length >= 1, 'others hear the "in" notice');
+  assert(notices(setup.conns[2]).length >= 1, 'others hear the "in" notice');
+  assert(notices(display).length >= 1, 'the shared display hears the "in" notice');
+  assert.strictEqual(notices(setup.conns[0])[0].game.publicResult.byName, 'P1', 'notice names the ready player');
+  assert.notStrictEqual(rematchView(setup.conns[0]).readySeats.indexOf(1), -1, 'roster reflects P1 as ready');
+}
+
+function testRematchAbsentBenched() {
+  const setup = setupRoom(3, 207);
+  mgrStart(setup);
+  const room = endGameInto(setup, 0);
+  setup.mgr.handleDisconnect(setup.conns[2]); // P2 leaves during the over phase
+  setup.mgr.rematchReady(setup.conns[0]);
+  setup.mgr.rematchReady(setup.conns[1]);
+  assert.strictEqual(room.phase, 'playing', 'unanimous among present players starts the hand');
+  assert.strictEqual(engine.isSeatActive(room.game, 2), false, 'absent P2 starts benched');
+  assert(engine.isSeatActive(room.game, 0) && engine.isSeatActive(room.game, 1), 'present ready players are active');
+}
+
+function testGraceAbandonNoRematch() {
+  const setup = setupRoom(2, 208);
+  mgrStart(setup);
+  const room = setup.mgr.rooms.get(setup.code);
+  setup.mgr.handleDisconnect(setup.conns[1]);
+  setup.mgr.expireGrace(setup.code, 1);
+  assert.strictEqual(room.phase, 'over', 'a two-player drop abandons the hand');
+  assert.strictEqual(room.endedReason, 'opponent-left', 'ended as opponent-left');
+  assert.strictEqual(room.rematch, null, 'a grace-abandoned hand offers no rematch');
+}
+
 function main() {
   testReverseAndBarracuda();
   testSynchroCatchesMultiple();
@@ -312,6 +454,14 @@ function main() {
   testRoomStartHostDropAndDisplay();
   testThemeChangePublicResultAndTowerPrivateDraw();
   testDrawAndPassPublicNotice();
+  testRematchUnanimousInProposeWindow();
+  testRematchProposeThenAllReady();
+  testRematchWaitCommitBenchAndReturn();
+  testRematchCommitNeedsEnoughReady();
+  testRematchBenchedSeatZeroOpensOnActive();
+  testRematchReadyPublicNotice();
+  testRematchAbsentBenched();
+  testGraceAbandonNoRematch();
   for (const players of [3, 4, 5, 6]) {
     for (let i = 0; i < 3; i++) playRandomGame(players, 1000 + players * 10 + i);
   }
